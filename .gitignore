@@ -194,6 +194,23 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Project-specific ignores
+PIPFILE.lock
+*.ipynb
+data/
+examples/checkpoints/
+examples/results/
+examples/*/outputs/
+*.pth
+*.pt
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+poetry.lock
+
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
 #  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data

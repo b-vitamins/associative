@@ -1,0 +1,65 @@
+# Optimized ImageNet-32 Image Reconstruction configuration
+
+# Model configuration - same as CIFAR for memory efficiency
+model:
+  patch_size: 4
+  num_patches: 64
+  embed_dim: 192
+  num_layers: 1
+  num_heads: 8
+  qk_dim: 64
+  mlp_ratio: 4.0
+  num_time_steps: 12
+  step_size: 0.125
+  norm_eps: 1e-6
+  attn_bias: false
+  mlp_bias: false
+  attn_beta: 0.125
+
+# Data configuration
+data:
+  dataset: imagenet32-1000
+  root: ${oc.env:HOME}/.cache/energy-transformer/data
+  batch_size: 256
+  num_workers: 8
+  mask_ratio: 0.75
+
+# Training configuration - optimized for performance
+train:
+  epochs: 50
+  resume: true
+  gradient_clip: 1.0
+  gradient_accumulation_steps: 1
+  use_amp: true
+  mixed_precision: "fp16"  # fp16, bf16, or no
+  optimizer:
+    lr: 6e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.05
+  scheduler:
+    enabled: true
+    type: "cosine_restarts"  # cosine or cosine_restarts
+    eta_min: 1e-6
+    T_0: 10  # For cosine_restarts
+    T_mult: 1  # For cosine_restarts
+
+# Directories
+checkpoint_dir: checkpoints/${data.dataset}
+image_dir: images/${data.dataset}
+result_dir: results/${data.dataset}
+visualization_dir: visualizations/${data.dataset}
+
+# Misc
+seed: 3407
+save_interval: 10     # Save less frequently due to longer training
+ckpt_every: 10
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true

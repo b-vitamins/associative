@@ -1,0 +1,64 @@
+# CIFAR-10 Image Reconstruction configuration
+
+# Model configuration - matching energy-transformer-torch
+model:
+  patch_size: 4
+  num_patches: 64  # (32/4)^2 for CIFAR
+  embed_dim: 256
+  num_layers: 1
+  num_heads: 12
+  qk_dim: 64
+  mlp_ratio: 4.0
+  num_time_steps: 12
+  step_size: 10.0  # alpha in original
+  norm_eps: 1e-6
+  attn_bias: false
+  mlp_bias: false
+  attn_beta: 0.125
+  # Stochastic gradient descent with noise
+  use_noise: true
+  noise_std: 0.02
+  noise_decay: true
+  noise_gamma: 0.55
+
+# Data configuration
+data:
+  dataset: cifar10
+  root: ${oc.env:HOME}/.cache/energy-transformer/data  # Use absolute path in cache dir
+  batch_size: 128
+  num_workers: 12
+  mask_ratio: 0.85
+
+# Training configuration - matching original hyperparameters
+train:
+  epochs: 1000
+  resume: false
+  gradient_clip: 1.0
+  optimizer:
+    lr: 5e-5
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+  scheduler:
+    enabled: true
+    eta_min: 1e-6
+
+# Directories
+checkpoint_dir: checkpoints/${data.dataset}
+image_dir: images/${data.dataset}
+result_dir: results/${data.dataset}
+visualization_dir: visualizations/${data.dataset}
+
+# Misc
+seed: 3407
+save_interval: 1
+ckpt_every: 1
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true

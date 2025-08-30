@@ -1,0 +1,23 @@
+# Main configuration for graph classification
+
+defaults:
+  - model: graph_transformer
+  - data: mutag
+  - train: graph_classification
+  - _self_
+
+# General settings
+seed: 42
+checkpoint_dir: checkpoints
+save_interval: 10
+log_interval: 10
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true

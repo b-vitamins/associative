@@ -1,0 +1,62 @@
+# Base configuration for Graph Classification tasks
+
+# Model configuration
+model:
+  embed_dim: 128
+  num_heads: 4
+  qk_dim: 32
+  num_layers: 1
+  mlp_ratio: 4.0
+  pos_encoding_dim: 8
+  num_time_steps: 5
+  step_size: 1.0
+  use_cls_token: true
+  norm_eps: 1e-6
+  attn_bias: false
+  mlp_bias: false
+  dropout: 0.1
+  pooling: cls
+
+# Data configuration
+data:
+  batch_size: 64
+  num_workers: 12
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  pos_encoding_method: random_walk
+
+# Training configuration
+train:
+  epochs: 200
+  patience: 20
+  gradient_clip: 1.0
+  optimizer:
+    lr: 1e-3
+    weight_decay: 0.0
+  scheduler:
+    enabled: false
+
+# Evaluation
+eval:
+  metric: accuracy
+
+# Directories
+checkpoint_dir: checkpoints/${data.name}
+result_dir: results/${data.name}
+visualization_dir: visualizations/${data.name}
+
+# Misc
+seed: 3407
+save_interval: 10
+log_interval: 10
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${data.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${data.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true

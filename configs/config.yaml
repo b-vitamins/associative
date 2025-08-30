@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - model: associative
+  - data: cifar10
+  - train: mae
+  - _self_
+
+# Experiment settings
+seed: 3407
+device: cuda
+
+# Output settings
+output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+checkpoint_dir: ${output_dir}/checkpoints
+image_dir: ${output_dir}/images
+
+# Logging
+log_interval: 100
+save_interval: 1
+visualize_samples: 16
+
+# Hydra settings
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${output_dir}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: true
