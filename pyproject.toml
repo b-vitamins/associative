@@ -48,6 +48,8 @@ ignore = ["E501", "S101"]
 "associative/nn/functional/**.py" = ["PLR0913"]  # Functional APIs have many parameters
 "associative/nn/modules/normalization.py" = ["PLR0913"]  # Init needs factory kwargs
 "associative/nn/modules/vision.py" = ["PLR0913"]  # Init needs many vision params
+"associative/nn/modules/optimization.py" = ["PLR0913"]  # Init needs many CCCP params
+"associative/nn/modules/continuous.py" = ["PLR0913"]  # Init needs many params
 "associative/nn/modules/transformer.py" = ["PLR0913"]  # Forward methods need many params
 "associative/utils/graph.py" = ["PLR0913"]  # Graph utilities need many params
 
