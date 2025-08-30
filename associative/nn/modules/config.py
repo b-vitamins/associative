@@ -215,3 +215,114 @@ class EnergyTransformerConfig:
         self._validate_vision_params()
         self._set_default_configs()
         self._set_default_dims()
+
+
+@dataclass(frozen=True)
+class BasisConfig:
+    """Configuration for basis functions.
+
+    Args:
+        num_basis: Number of basis functions
+        basis_type: Type of basis ("rectangular", "gaussian", "fourier")
+        domain: Domain of basis functions as (start, end)
+        learnable: Whether basis parameters are learnable
+        overlap: Overlap factor for rectangular basis (0-1)
+        init_width: Initial width for Gaussian basis
+        max_frequency: Maximum frequency for Fourier basis
+    """
+
+    num_basis: int
+    basis_type: str = "rectangular"
+    domain: tuple[float, float] = (0.0, 1.0)
+    learnable: bool = False
+    overlap: float = 0.0
+    init_width: float | None = None
+    max_frequency: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.num_basis <= 0:
+            raise ValueError(f"num_basis must be positive, got {self.num_basis}")
+
+        valid_types = {"rectangular", "gaussian", "fourier"}
+        if self.basis_type not in valid_types:
+            raise ValueError(
+                f"basis_type must be one of {valid_types}, got {self.basis_type}"
+            )
+
+        if self.domain[0] >= self.domain[1]:
+            raise ValueError(f"Invalid domain {self.domain}, start must be < end")
+
+        if not 0 <= self.overlap <= 1:
+            raise ValueError(f"overlap must be in [0, 1], got {self.overlap}")
+
+
+@dataclass(frozen=True)
+class CCCPConfig:
+    """Configuration for CCCP optimization.
+
+    Args:
+        max_iterations: Maximum number of CCCP iterations
+        tolerance: Convergence tolerance for point difference
+        step_size: Step size for damped updates (0 < alpha <= 1)
+        momentum: Momentum coefficient for acceleration
+        track_trajectory: Whether to record optimization path
+        use_line_search: Whether to use backtracking line search
+    """
+
+    max_iterations: int = 100
+    tolerance: float = 1e-6
+    step_size: float = 1.0
+    momentum: float = 0.0
+    track_trajectory: bool = False
+    use_line_search: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_iterations <= 0:
+            raise ValueError(
+                f"max_iterations must be positive, got {self.max_iterations}"
+            )
+        if self.tolerance <= 0:
+            raise ValueError(f"tolerance must be positive, got {self.tolerance}")
+        if not 0 < self.step_size <= 1:
+            raise ValueError(f"step_size must be in (0, 1], got {self.step_size}")
+        if not 0 <= self.momentum < 1:
+            raise ValueError(f"momentum must be in [0, 1), got {self.momentum}")
+
+
+@dataclass(frozen=True)
+class ContinuousHopfieldConfig:
+    """Configuration for continuous Hopfield networks.
+
+    Args:
+        basis_config: Configuration for basis functions
+        beta: Inverse temperature parameter
+        regularization: Ridge regression regularization
+        integration_points: Number of points for numerical integration
+        cccp_config: Configuration for CCCP optimizer
+        use_analytical_update: Whether to use analytical CCCP solution
+        memory_compression: Target compression ratio N/L (None = use basis_config.num_basis)
+    """
+
+    basis_config: BasisConfig
+    beta: float = 1.0
+    regularization: float = 0.5
+    integration_points: int = 500
+    cccp_config: CCCPConfig = field(default_factory=CCCPConfig)
+    use_analytical_update: bool = True
+    memory_compression: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.beta <= 0:
+            raise ValueError(f"beta must be positive, got {self.beta}")
+        if self.regularization <= 0:
+            raise ValueError(
+                f"regularization must be positive, got {self.regularization}"
+            )
+        if self.integration_points <= 0:
+            raise ValueError(
+                f"integration_points must be positive, got {self.integration_points}"
+            )
+        if self.memory_compression is not None and not 0 < self.memory_compression <= 1:
+            raise ValueError(
+                f"memory_compression must be in (0, 1], got {self.memory_compression}"
+            )
