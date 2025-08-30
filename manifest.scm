@@ -3,27 +3,20 @@
 (specifications->manifest
  '(;; Core Python
    "python"
-   
    ;; Runtime dependencies
-   "python-pytorch-cuda"
-   "python-torchvision-cuda"
+   "python-pytorch"
+   "python-torchvision"
    "python-pytorch-geometric"
    "python-einops"
    "python-tqdm"
    "python-hydra-core"
    "python-pandas"
    "python-pyarrow"
-   
-   ;; Audio/Video processing for GRID dataset
    "python-librosa"
    "python-soundfile"
-   "python-decord"  ;; Video reading for MovieChat dataset
-   
+   "python-decord"
    ;; Development dependencies
    "python-pytest"
    "python-pytest-cov"
    "python-ruff"
-   "node-pyright"
-   
-   ;; Build system
-   "poetry"))
+   "node-pyright"))
