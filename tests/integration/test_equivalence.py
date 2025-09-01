@@ -39,8 +39,8 @@ class TestVisionEquivalence:
         """Test that components are initialized correctly."""
         # Test key initialization values that affect equivalence
         assert torch.allclose(model.cls_token, torch.ones_like(model.cls_token))
-        assert model.pos_embed.std().item() < 0.01  # ~0.002  # noqa: PLR2004
-        assert model.mask_token.std().item() < 0.01  # ~0.002  # noqa: PLR2004
+        assert model.pos_embed.std().item() < 0.01  # ~0.002
+        assert model.mask_token.std().item() < 0.01  # ~0.002
 
         # Test output projection has LayerNorm with correct eps
         ln_layer = model.output_proj[0]
@@ -144,7 +144,7 @@ class TestGraphEquivalence:
         attn = model.blocks[0].attention
 
         # Head mixing should be initialized with small values
-        assert attn.head_mix.std().item() < 0.01  # ~0.002  # noqa: PLR2004
+        assert attn.head_mix.std().item() < 0.01  # ~0.002
         assert attn.head_mix.shape == (model.config.num_heads, model.config.num_heads)
 
     def test_adjacency_processing(self, model):

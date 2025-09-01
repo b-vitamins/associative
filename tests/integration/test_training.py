@@ -107,7 +107,7 @@ class TestVisionTraining:
         total_params = sum(1 for p in model.parameters() if p.requires_grad)
         assert params_with_grad > 0  # At least some parameters should have gradients
         assert (
-            params_with_grad / total_params > 0.3  # noqa: PLR2004
+            params_with_grad / total_params > 0.3
         )  # At least 30% of parameters should have gradients
 
     def test_training_with_different_alpha(self, model):
@@ -152,7 +152,7 @@ class TestGraphTraining:
         # Create synthetic graph
         num_nodes = 20
         node_features = torch.randn(1, num_nodes, 16)
-        adjacency = (torch.rand(1, num_nodes, num_nodes, 1) > 0.7).float()  # noqa: PLR2004
+        adjacency = (torch.rand(1, num_nodes, num_nodes, 1) > 0.7).float()
         adjacency = adjacency * adjacency.transpose(1, 2)  # Symmetric
         pos_encoding = torch.randn(1, num_nodes + 1, 10)  # +1 for CLS
 
