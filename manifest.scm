@@ -7,6 +7,7 @@
    "python-pytorch"
    "python-torchvision"
    "python-pytorch-geometric"
+   "python-transformers"
    "python-einops"
    "python-tqdm"
    "python-hydra-core"
@@ -15,6 +16,7 @@
    "python-librosa"
    "python-soundfile"
    "python-decord"
+   "python-huggingface-hub"
    ;; Development dependencies
    "python-pytest"
    "python-pytest-cov"
