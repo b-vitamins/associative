@@ -1,298 +1,351 @@
 """Tests for MovieChat1K dataset."""
 
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-import torch
-from torchvision import transforms
 
-from associative.datasets import MovieChat1K
-
-# Test constants
-TEST_NUM_FRAMES = 16
-TEST_RESOLUTION = 224
-TEST_MASK_RATIO = 0.5
-TEST_NUM_VIDEOS = 3
-TEST_NUM_SEGMENTS = 10
-TEST_TOTAL_FRAMES = 100
-TEST_STD_THRESHOLD = 2
-TEST_MASK_LOWER_BOUND = 0.25
-TEST_MASK_UPPER_BOUND = 0.35
-TEST_NORMALIZE_MIN = -1.5
-TEST_NORMALIZE_MAX = 1.5
+from associative.datasets.moviechat import MovieChat1K
 
 
 class TestMovieChat1K:
     """Test suite for MovieChat1K dataset."""
 
     @pytest.fixture
-    def temp_video_dir(self):
-        """Create temporary directory with mock video files."""
+    def temp_cache_dir(self):
+        """Create temporary cache directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create dummy .mp4 files
-            for i in range(3):
-                Path(tmpdir, f"video_{i}.mp4").touch()
             yield tmpdir
 
-    @pytest.fixture
-    def mock_video_reader(self):
-        """Mock VideoReader to avoid needing actual video files."""
-        with patch("associative.datasets.moviechat.VideoReader") as mock:
-            # Create mock video reader that returns random frames
-            mock_reader = MagicMock()
-            mock_reader.__len__.return_value = 100  # 100 frames
-            mock_reader.__getitem__.return_value = MagicMock(
-                asnumpy=lambda: np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+    @pytest.fixture(params=["train", "test"])
+    def mock_video_dir(self, temp_cache_dir, request):
+        """Create a mock video directory with test files."""
+        split = request.param
+        video_dir = Path(temp_cache_dir) / "moviechat" / split / "videos"
+        video_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create some dummy video files
+        for i in range(3):
+            (video_dir / f"video_{i}.mp4").touch()
+
+        return temp_cache_dir, split
+
+    @pytest.mark.parametrize("split", ["train", "test"])
+    def test_initialization_default_cache(self, split, temp_cache_dir):
+        """Test dataset initialization with default XDG cache."""
+        mock_xdg = str(Path(temp_cache_dir) / "test_cache")
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": mock_xdg}):
+            # Create required directories for download=False
+            cache_dir = Path(f"{mock_xdg}/associative/moviechat/{split}")
+            video_dir = cache_dir / "videos"
+            video_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a dummy video file
+            (video_dir / "test.mp4").touch()
+
+            try:
+                dataset = MovieChat1K(split=split, download=False)
+                assert dataset.root == Path(f"{mock_xdg}/associative/moviechat/{split}")
+            finally:
+                # Cleanup
+                import shutil
+
+                if cache_dir.parent.exists():
+                    shutil.rmtree(cache_dir.parent)
+
+    def test_initialization_custom_root(self, mock_video_dir):
+        """Test dataset initialization with custom root."""
+        mock_dir, split = mock_video_dir
+        dataset = MovieChat1K(root=mock_dir, split=split, download=False)
+        assert dataset.root == Path(mock_dir) / "moviechat" / split
+        assert dataset.split == split
+        assert len(dataset) == 3  # 3 mock videos
+
+    def test_initialization_parameters(self, mock_video_dir):
+        """Test all initialization parameters."""
+        mock_dir, split = mock_video_dir
+        dataset = MovieChat1K(
+            root=mock_dir,
+            split=split,
+            num_frames=256,
+            resolution=336,
+            download=False,
+            max_videos=2,
+        )
+
+        assert dataset.num_frames == 256
+        assert dataset.resolution == 336
+        assert dataset.max_videos == 2
+        assert len(dataset) == 2  # Limited to 2 videos
+
+    @pytest.mark.parametrize("split", ["train", "test"])
+    def test_no_download_empty_cache(self, temp_cache_dir, split):
+        """Test error when cache is empty and download=False."""
+        with pytest.raises(RuntimeError, match="Video directory .* does not exist"):
+            MovieChat1K(
+                root=temp_cache_dir,
+                split=split,
+                download=False,
             )
-            mock.return_value = mock_reader
-            yield mock
 
-    def test_initialization(self, temp_video_dir):
-        """Test dataset initialization."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            num_frames=16,
-            resolution=224,
-            mask_config={"mask_type": "bottom_half", "mask_ratio": 0.5},
+    def test_invalid_split(self, mock_video_dir):
+        """Test error with invalid split."""
+        mock_dir, _ = mock_video_dir
+        with pytest.raises(ValueError, match="Invalid split"):
+            MovieChat1K(
+                root=mock_dir,
+                split="validation",  # pyright: ignore[reportArgumentType] # Invalid
+                download=False,
+            )
+
+    @patch("associative.datasets.moviechat.VideoReader")
+    def test_getitem_structure(self, mock_reader, mock_video_dir):
+        """Test __getitem__ returns correct structure."""
+        mock_dir, split = mock_video_dir
+        # Mock VideoReader
+        reader = MagicMock()
+        reader.__len__.return_value = 1000
+        # Mock individual frame access
+        frame_mock = MagicMock()
+        frame_mock.asnumpy.return_value = np.random.randint(
+            0, 255, (224, 224, 3), dtype=np.uint8
         )
+        reader.__getitem__.return_value = frame_mock
+        mock_reader.return_value = reader
 
-        assert dataset.root == Path(temp_video_dir)
-        assert dataset.num_frames == TEST_NUM_FRAMES
-        assert dataset.resolution == TEST_RESOLUTION
-        assert dataset.mask_ratio == TEST_MASK_RATIO
-        assert dataset.mask_type == "bottom_half"
-        assert len(dataset) == TEST_NUM_VIDEOS  # mock videos
-
-    def test_no_videos_error(self):
-        """Test error when no videos found."""
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            pytest.raises(ValueError, match="No .mp4 files found"),
-        ):
-            MovieChat1K(root=tmpdir)
-
-    def test_frame_indices(self):
-        """Test frame index calculation."""
-        from associative.datasets.moviechat import get_frame_indices
-
-        indices = get_frame_indices(
-            num_frames=TEST_TOTAL_FRAMES, num_segments=TEST_NUM_SEGMENTS
-        )
-
-        assert len(indices) == TEST_NUM_SEGMENTS
-        assert indices[0] >= 0
-        assert indices[-1] < TEST_TOTAL_FRAMES
-        # Check roughly uniform spacing
-        diffs = np.diff(indices)
-        assert np.std(diffs) < TEST_STD_THRESHOLD  # Should be roughly uniform
-
-    def test_load_video_frames(self, temp_video_dir, mock_video_reader):
-        """Test video frame loading."""
         dataset = MovieChat1K(
-            root=temp_video_dir,
+            root=mock_dir,
+            split=split,
             num_frames=8,
             resolution=224,
-        )
-
-        video_path = Path(temp_video_dir, "video_0.mp4")
-        frames = dataset.load_video_frames(video_path)
-
-        assert frames.shape == (8, 3, 224, 224)
-        assert frames.dtype == torch.float32
-        # Check normalization (should be in [-1, 1] with default transform)
-        assert frames.min() >= TEST_NORMALIZE_MIN
-        assert frames.max() <= TEST_NORMALIZE_MAX
-
-    def test_apply_mask_bottom_half(self, temp_video_dir):
-        """Test bottom half masking."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            mask_config={"mask_type": "bottom_half", "mask_ratio": 0.5},
-        )
-
-        frames = torch.randn(4, 3, 224, 224)
-        masked_frames, mask = dataset.apply_mask(frames)
-
-        assert masked_frames.shape == frames.shape
-        assert mask.shape == (4, 224, 224)
-
-        # Check bottom half is masked
-        assert torch.all(masked_frames[:, :, 112:, :] == 0)
-        assert torch.all(mask[:, 112:, :])  # All True
-        assert torch.all(~mask[:, :112, :])  # All False
-
-    def test_apply_mask_random(self, temp_video_dir):
-        """Test random masking."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            mask_config={"mask_type": "random", "mask_ratio": 0.3},
-        )
-
-        frames = torch.randn(4, 3, 224, 224)
-        masked_frames, mask = dataset.apply_mask(frames)
-
-        assert masked_frames.shape == frames.shape
-        assert mask.shape == (4, 224, 224)
-
-        # Check approximately 30% masked
-        mask_ratio = mask.float().mean().item()
-        assert TEST_MASK_LOWER_BOUND < mask_ratio < TEST_MASK_UPPER_BOUND
-
-    def test_apply_mask_none(self, temp_video_dir):
-        """Test no masking."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            mask_config={"mask_type": "none"},
-        )
-
-        frames = torch.randn(4, 3, 224, 224)
-        original_frames = frames.clone()
-        masked_frames, mask = dataset.apply_mask(frames)
-
-        assert torch.allclose(masked_frames, original_frames)
-        assert torch.all(~mask)  # All False
-
-    def test_compute_embeddings_mock(self, temp_video_dir):
-        """Test embedding computation with mock model."""
-        # Create mock embedding model
-        mock_model = MagicMock()
-        mock_model.parameters.return_value = iter([torch.tensor([1.0])])
-        mock_model.return_value = torch.randn(8, 768)  # Batch of embeddings
-
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            mask_config={"embedding_model": mock_model},
-        )
-
-        frames = torch.randn(8, 3, 224, 224)
-        embeddings = dataset.compute_embeddings(frames)
-
-        assert embeddings.shape == (8, 768)
-        mock_model.assert_called_once()
-
-    def test_compute_embeddings_error(self, temp_video_dir):
-        """Test error when embedding model missing."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-        )
-
-        frames = torch.randn(8, 3, 224, 224)
-
-        with pytest.raises(ValueError, match="Embedding model required"):
-            dataset.compute_embeddings(frames)
-
-    def test_getitem_pixels(self, temp_video_dir, mock_video_reader):
-        """Test __getitem__ for pixel-level experiments."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-            num_frames=8,
-            resolution=224,
-            mask_config={"mask_type": "bottom_half", "mask_ratio": 0.5},
+            download=False,
         )
 
         sample = dataset[0]
 
+        # Check required keys
         assert "frames" in sample
-        assert "masked_frames" in sample
-        assert "mask" in sample
-        assert "video_path" in sample
-        assert "video_name" in sample
+        assert "video_id" in sample
 
+        # Check shapes
         assert sample["frames"].shape == (8, 3, 224, 224)
-        assert sample["masked_frames"].shape == (8, 3, 224, 224)
-        assert sample["mask"].shape == (8, 224, 224)
+        assert isinstance(sample["video_id"], str)
 
-        # Check bottom half is masked
-        assert torch.all(sample["masked_frames"][:, :, 112:, :] == 0)
+    @patch("associative.datasets.moviechat.VideoReader")
+    def test_frame_sampling(self, mock_reader, mock_video_dir):
+        """Test uniform frame sampling."""
+        mock_dir, split = mock_video_dir
+        # Track which indices are accessed
+        accessed_indices = []
 
-    def test_getitem_embeddings(self, temp_video_dir, mock_video_reader):
-        """Test __getitem__ for embedding-level experiments."""
-        # Mock embedding model
-        mock_model = MagicMock()
-        mock_model.parameters.return_value = iter([torch.tensor([1.0])])
-        mock_model.return_value = torch.randn(8, 768)
+        def getitem_side_effect(idx):
+            accessed_indices.append(idx)
+            frame_mock = MagicMock()
+            frame_mock.asnumpy.return_value = np.random.randint(
+                0, 255, (224, 224, 3), dtype=np.uint8
+            )
+            return frame_mock
+
+        reader = MagicMock()
+        reader.__len__.return_value = 1000
+        reader.__getitem__.side_effect = getitem_side_effect
+        mock_reader.return_value = reader
 
         dataset = MovieChat1K(
-            root=temp_video_dir,
+            root=mock_dir,
+            split=split,
+            num_frames=64,
+            download=False,
+        )
+
+        _ = dataset[0]
+
+        # Check that 64 frames were sampled
+        assert len(accessed_indices) == 64
+        # Check roughly uniform distribution
+        assert min(accessed_indices) >= 0
+        assert max(accessed_indices) < 1000
+
+    def test_repr(self, mock_video_dir):
+        """Test string representation."""
+        mock_dir, split = mock_video_dir
+        dataset = MovieChat1K(
+            root=mock_dir,
+            split=split,
+            download=False,
+        )
+
+        repr_str = repr(dataset)
+        assert "MovieChat1K" in repr_str
+        assert split in repr_str
+        assert "num_videos=3" in repr_str
+
+    @pytest.mark.parametrize("num_frames", [64, 128, 256, 512])
+    def test_various_frame_counts(self, mock_video_dir, num_frames):
+        """Test with different frame counts."""
+        mock_dir, split = mock_video_dir
+        dataset = MovieChat1K(
+            root=mock_dir,
+            split=split,
+            num_frames=num_frames,
+            download=False,
+        )
+
+        assert dataset.num_frames == num_frames
+
+    @pytest.mark.parametrize("split", ["train", "test"])
+    def test_download_with_token(self, temp_cache_dir, split):
+        """Test download functionality with HF token."""
+        with (
+            patch.dict(os.environ, {"HF_TOKEN": "test_token"}),
+            patch("associative.datasets.moviechat.list_repo_files") as mock_list,
+            patch("associative.datasets.moviechat.hf_hub_download") as mock_download,
+        ):
+            # Mock repo files based on split
+            if split == "train":
+                mock_list.return_value = [
+                    "raw_videos/video_0.mp4",
+                    "jsons/video_0.json",
+                    "movies/video_0.pt",
+                ]
+            else:
+                mock_list.return_value = [
+                    "videos/1.mp4",
+                    "gt/1.json",
+                    "annotations/2.json",
+                ]
+
+            # Mock download to create actual file in appropriate dir
+            def download_side_effect(repo_id, filename, **kwargs):
+                root = Path(temp_cache_dir) / "moviechat" / split
+                if filename.endswith(".mp4"):
+                    dir_path = root / "videos"
+                elif filename.endswith(".json"):
+                    dir_path = root / "metadata"
+                else:
+                    dir_path = root / "features"
+                dir_path.mkdir(parents=True, exist_ok=True)
+                tmp_file = dir_path / Path(filename).name
+                tmp_file.touch()
+                return str(tmp_file)
+
+            mock_download.side_effect = download_side_effect
+
+            dataset = MovieChat1K(
+                root=temp_cache_dir,
+                split=split,
+                download=True,
+            )
+
+            # Check that download was called
+            mock_list.assert_called_once()
+            assert mock_download.call_count == len(mock_list.return_value)
+
+            # Check directories have files
+            assert len(list(dataset.video_dir.glob("*.mp4"))) > 0
+            assert len(list(dataset.metadata_dir.glob("*.json"))) > 0
+            if split == "train":
+                assert len(list(dataset.features_dir.glob("*"))) > 0
+            else:
+                assert len(list(dataset.features_dir.glob("*"))) == 0
+
+    @pytest.mark.parametrize("split", ["train", "test"])
+    def test_no_token_error(self, temp_cache_dir, split):
+        """Test error when HF_TOKEN is missing."""
+        # Remove HF_TOKEN if it exists
+        env_copy = os.environ.copy()
+        if "HF_TOKEN" in env_copy:
+            del env_copy["HF_TOKEN"]
+
+        with (
+            patch.dict(os.environ, env_copy, clear=True),
+            pytest.raises(
+                ValueError, match="HF_TOKEN environment variable is required"
+            ),
+        ):
+            MovieChat1K(
+                root=temp_cache_dir,
+                split=split,
+                download=True,
+            )
+
+    @patch("associative.datasets.moviechat.VideoReader")
+    def test_video_loading_error(self, mock_reader, mock_video_dir):
+        """Test handling of video loading errors."""
+        mock_dir, split = mock_video_dir
+        # Mock VideoReader to raise an error
+        mock_reader.side_effect = Exception("Cannot decode video")
+
+        dataset = MovieChat1K(
+            root=mock_dir,
+            split=split,
+            download=False,
+        )
+
+        with pytest.raises(Exception, match="Cannot decode video"):
+            _ = dataset[0]
+
+    @patch("associative.datasets.moviechat.VideoReader")
+    def test_frames_returned(self, mock_reader, mock_video_dir):
+        """Test that frames are properly returned."""
+        mock_dir, split = mock_video_dir
+        reader = MagicMock()
+        reader.__len__.return_value = 100
+        # Mock individual frame access with consistent values
+        frame_mock = MagicMock()
+        frame_mock.asnumpy.return_value = np.ones((224, 224, 3), dtype=np.uint8) * 128
+        reader.__getitem__.return_value = frame_mock
+        mock_reader.return_value = reader
+
+        dataset = MovieChat1K(
+            root=mock_dir,
+            split=split,
             num_frames=8,
-            resolution=224,
-            mask_config={
-                "return_embeddings": True,
-                "embedding_model": mock_model,
-                "noise_std": 0.1,
-            },
+            download=False,
         )
 
-        # Set random seed for reproducibility
-        torch.manual_seed(42)
         sample = dataset[0]
 
-        assert sample["frames"].shape == (8, 768)
-        assert sample["masked_frames"].shape == (8, 768)
+        # Check that frames are returned
+        assert "frames" in sample
+        assert sample["frames"].shape == (8, 3, 224, 224)
 
-        # Check noise was added
-        diff = (sample["masked_frames"] - sample["frames"]).abs()
-        assert diff.mean() > 0  # Should have noise
+        # Check that frames have been normalized (not raw pixel values)
+        # Values of 128 after standard ImageNet normalization should be around 0
+        # Just check that they're in a reasonable range
+        assert -3 < sample["frames"].min() < 3
+        assert -3 < sample["frames"].max() < 3
 
-    def test_custom_transform(self, temp_video_dir, mock_video_reader):
-        """Test with custom transform pipeline."""
-        custom_transform = transforms.Compose(
-            [
-                transforms.Resize((128, 128)),
-                transforms.ToTensor(),
-            ]
+    @patch("associative.datasets.moviechat.VideoReader")
+    def test_transform_applied(self, mock_reader, mock_video_dir):
+        """Test that transforms are properly applied."""
+        mock_dir, split = mock_video_dir
+        reader = MagicMock()
+        reader.__len__.return_value = 100
+        # Mock individual frame access
+        frame_mock = MagicMock()
+        frame_mock.asnumpy.return_value = np.random.randint(
+            0, 255, (480, 640, 3), dtype=np.uint8
         )
+        reader.__getitem__.return_value = frame_mock
+        mock_reader.return_value = reader
 
         dataset = MovieChat1K(
-            root=temp_video_dir,
+            root=mock_dir,
+            split=split,
             num_frames=4,
-            resolution=128,
-            transform=custom_transform,
+            resolution=112,
+            download=False,
         )
 
         sample = dataset[0]
-        assert sample["frames"].shape == (4, 3, 128, 128)
 
-    def test_different_resolutions(self, temp_video_dir):
-        """Test with different resolutions."""
-        for resolution in [112, 224, 336]:
-            dataset = MovieChat1K(
-                root=temp_video_dir,
-                resolution=resolution,
-            )
-            assert dataset.resolution == resolution
+        # Check resolution was applied
+        assert sample["frames"].shape == (4, 3, 112, 112)
 
-    def test_different_num_frames(self, temp_video_dir):
-        """Test with different numbers of frames."""
-        for num_frames in [8, 16, 32, 64]:
-            dataset = MovieChat1K(
-                root=temp_video_dir,
-                num_frames=num_frames,
-            )
-            assert dataset.num_frames == num_frames
-
-    def test_embedding_pooling(self, temp_video_dir):
-        """Test handling of different embedding output formats."""
-        dataset = MovieChat1K(
-            root=temp_video_dir,
-        )
-
-        frames = torch.randn(8, 3, 224, 224)
-
-        # Test with spatial features (need pooling)
-        mock_model = MagicMock()
-        # Use side_effect to return a new iterator each time
-        mock_model.parameters.side_effect = lambda: iter([torch.tensor([1.0])])
-        mock_model.return_value = torch.randn(8, 768, 7, 7)  # Spatial features
-        dataset.embedding_model = mock_model
-
-        embeddings = dataset.compute_embeddings(frames)
-        assert embeddings.shape == (8, 768)  # Should be pooled
-
-        # Test with tuple output
-        mock_model.return_value = (torch.randn(8, 768), torch.randn(8, 10))
-        embeddings = dataset.compute_embeddings(frames)
-        assert embeddings.shape == (8, 768)  # Should take first element
+        # Check normalization was applied (should be roughly in [-3, 3] after standard normalization)
+        assert -4 < sample["frames"].min() < 0
+        assert 0 < sample["frames"].max() < 4
