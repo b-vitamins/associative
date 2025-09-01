@@ -218,6 +218,9 @@ poetry.lock
 .cursorignore
 .cursorindexingignore
 
+# Claude
+.claude
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
