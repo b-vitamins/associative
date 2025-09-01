@@ -238,6 +238,7 @@ class TestMovieChat1K:
                 root=temp_cache_dir,
                 split=split,
                 download=True,
+                download_features=True,
             )
 
             # Check that download was called

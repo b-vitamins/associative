@@ -48,6 +48,7 @@ class MovieChat1K(Dataset):
         transform: Optional transform to apply to frames
         download: If True, download dataset if not found
         max_videos: Maximum number of videos to use (None for all, for testing only)
+        download_features: If True, also download pre-extracted features (train split only; default False)
     """
 
     # Dataset configuration
@@ -66,7 +67,7 @@ class MovieChat1K(Dataset):
         "test": ["annotations/", "gt/"],
     }
 
-    ADDITIONAL_PREFIXES: ClassVar[dict[str, list[str]]] = {
+    FEATURES_PREFIXES: ClassVar[dict[str, list[str]]] = {
         "train": ["movies/"],
         "test": [],
     }
@@ -80,6 +81,7 @@ class MovieChat1K(Dataset):
         transform: Any | None = None,
         download: bool = True,
         max_videos: int | None = None,
+        download_features: bool = False,
     ):
         """Initialize MovieChat-1K dataset."""
         # Use XDG compliant cache directory
@@ -94,6 +96,7 @@ class MovieChat1K(Dataset):
         self.transform = transform
         self.download = download
         self.max_videos = max_videos
+        self.download_features = download_features
 
         # Validate split
         if split not in ["train", "test"]:
@@ -137,12 +140,14 @@ class MovieChat1K(Dataset):
         """Check if dataset files exist."""
         return self.video_dir.exists() and len(list(self.video_dir.glob("*.mp4"))) > 0
 
-    def _download(self) -> None:
+    def _download(self) -> None:  # noqa: C901
         """Download dataset from Hugging Face."""
         repo_id = self.HF_REPO_IDS[self.split]
         video_prefix = self.VIDEO_PREFIXES[self.split]
         metadata_prefixes = self.METADATA_PREFIXES[self.split]
-        additional_prefixes = self.ADDITIONAL_PREFIXES[self.split]
+        features_prefixes = (
+            self.FEATURES_PREFIXES[self.split] if self.download_features else []
+        )
 
         # Create directories
         self.video_dir.mkdir(parents=True, exist_ok=True)
@@ -159,12 +164,38 @@ class MovieChat1K(Dataset):
             ) from e
 
         # Collect all files to download
-        all_files = self._collect_files_to_download(
-            files, video_prefix, metadata_prefixes, additional_prefixes
+        all_files = []
+
+        # Videos (always download)
+        video_files = sorted(
+            f for f in files if f.startswith(video_prefix) and f.endswith(".mp4")
         )
+        if self.max_videos is not None:
+            video_files = video_files[: self.max_videos]
+        all_files.extend((f, self.video_dir) for f in video_files)
+
+        # Metadata (always download)
+        json_files = sorted(
+            f
+            for f in files
+            if any(f.startswith(p) for p in metadata_prefixes) and f.endswith(".json")
+        )
+        if self.max_videos is not None:
+            json_files = json_files[: self.max_videos]
+        all_files.extend((f, self.metadata_dir) for f in json_files)
+
+        # Features (optional)
+        if features_prefixes:
+            features_files = sorted(
+                f for f in files if any(f.startswith(p) for p in features_prefixes)
+            )
+            if self.max_videos is not None:
+                features_files = features_files[: self.max_videos]
+            all_files.extend((f, self.features_dir) for f in features_files)
 
         total_files = len(all_files)
         if total_files == 0:
+            print("No files found to download.")
             return
 
         # Single progress bar for all downloads
@@ -197,44 +228,6 @@ class MovieChat1K(Dataset):
                     continue
 
                 pbar.update(1)
-
-    def _collect_files_to_download(
-        self,
-        files: list[str],
-        video_prefix: str,
-        metadata_prefixes: list[str],
-        additional_prefixes: list[str],
-    ) -> list[tuple[str, Path]]:
-        all_files = []
-
-        # Videos
-        video_files = sorted(
-            f for f in files if f.startswith(video_prefix) and f.endswith(".mp4")
-        )
-        if self.max_videos is not None:
-            video_files = video_files[: self.max_videos]
-        all_files.extend((f, self.video_dir) for f in video_files)
-
-        # Metadata
-        json_files = sorted(
-            f
-            for f in files
-            if any(f.startswith(p) for p in metadata_prefixes) and f.endswith(".json")
-        )
-        if self.max_videos is not None:
-            json_files = json_files[: self.max_videos]
-        all_files.extend((f, self.metadata_dir) for f in json_files)
-
-        # Additional
-        if additional_prefixes:
-            additional_files = sorted(
-                f for f in files if any(f.startswith(p) for p in additional_prefixes)
-            )
-            if self.max_videos is not None:
-                additional_files = additional_files[: self.max_videos]
-            all_files.extend((f, self.features_dir) for f in additional_files)
-
-        return all_files
 
     def _load_video_list(self) -> None:
         """Load list of available videos."""
@@ -382,6 +375,7 @@ def create_moviechat_dataloader(  # noqa: PLR0913
     pin_memory: bool = True,
     download: bool = True,
     max_videos: int | None = None,
+    download_features: bool = False,
     **kwargs: Any,
 ) -> tuple[MovieChat1K, torch.utils.data.DataLoader]:
     """Create MovieChat-1K dataset and dataloader.
@@ -397,6 +391,7 @@ def create_moviechat_dataloader(  # noqa: PLR0913
         pin_memory: Whether to pin memory for CUDA
         download: Whether to download dataset if not found
         max_videos: Maximum number of videos to use
+        download_features: If True, also download pre-extracted features (train split only)
         **kwargs: Additional arguments for MovieChat1K
 
     Returns:
@@ -426,6 +421,7 @@ def create_moviechat_dataloader(  # noqa: PLR0913
         resolution=resolution,
         download=download,
         max_videos=max_videos,
+        download_features=download_features,
         **kwargs,
     )
 
