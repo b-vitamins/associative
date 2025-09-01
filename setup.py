@@ -32,6 +32,8 @@ setup(
         "torchvision>=0.15.0",
         "einops>=0.6.0",
         "tqdm>=4.65.0",
+        "transformers>=4.45.0",
+        "huggingface-hub>=0.25.0"
     ],
     extras_require={
         "dev": [
