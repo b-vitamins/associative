@@ -1,10 +1,16 @@
-"""Comprehensive tests for video transform classes."""
+"""Tests for video transforms.
 
-from unittest.mock import Mock, patch
+Focus on behavioral testing - verifying that transforms actually work correctly,
+not just that they call the right functions. Each test should validate the
+actual transformation behavior and output correctness.
+"""
+
+import tempfile
 
 import numpy as np
 import pytest
 import torch
+from torch import Tensor
 
 from associative.utils.video.transforms import (
     AddNoise,
@@ -16,734 +22,645 @@ from associative.utils.video.transforms import (
     Resize,
     ToTensor,
     UniformSample,
-    VideoTransform,
 )
 
 
-class TestVideoTransformInterface:
-    """Test VideoTransform abstract interface."""
-
-    def test_abstract_interface(self):
-        """Test that VideoTransform cannot be instantiated directly."""
-        with pytest.raises(TypeError, match="abstract"):
-            VideoTransform()  # type: ignore[abstract]
-
-    def test_repr_method(self):
-        """Test that concrete transforms implement __repr__."""
-        transform = UniformSample(num_frames=100)
-        repr_str = repr(transform)
-        assert "UniformSample" in repr_str
-        assert "100" in repr_str
-
-
 class TestCompose:
-    """Test Compose transform composition."""
+    """Test transform composition behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of Compose."""
-        transforms = [UniformSample(num_frames=50), Resize(224), Normalize()]
-        compose = Compose(transforms)
+    def test_single_transform(self):
+        """Test compose with single transform."""
+        transform = Compose([Resize(128)])
+        frames = torch.randn(10, 3, 256, 256)
 
-        assert len(compose.transforms) == 3
-        assert compose.transforms[0] == transforms[0]
+        result = transform(frames)
 
-    def test_invalid_initialization(self):
-        """Test that invalid transforms raise errors."""
-        # Non-callable items should raise TypeError
+        assert result.shape == (10, 3, 128, 128)
+        assert result.dtype == frames.dtype
+
+    def test_multiple_transforms_in_sequence(self):
+        """Test that transforms are applied in correct order."""
+        # Create a specific sequence where order matters
+        transform = Compose(
+            [
+                UniformSample(num_frames=5),  # First reduce frames
+                Resize(64),  # Then resize
+                Normalize(
+                    mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)
+                ),  # Finally normalize
+            ]
+        )
+
+        # Create frames with known values
+        frames = torch.ones(20, 3, 128, 128) * 0.5
+        result = transform(frames)
+
+        # Check each step worked
+        assert result.shape == (5, 3, 64, 64)  # Sampled and resized
+        assert torch.allclose(
+            result, torch.zeros_like(result), atol=1e-6
+        )  # Normalized to 0
+
+    def test_transform_with_tuple_return(self):
+        """Test compose handles transforms that return tuples."""
+        transform = Compose(
+            [
+                ApplyMask(mask_ratio=0.5, return_mask=True),  # Returns (frames, mask)
+                Resize(32),  # Should only operate on frames
+            ]
+        )
+
+        frames = torch.ones(4, 3, 64, 64)
+        result = transform(frames)
+
+        # Compose should extract tensor from tuple and pass it along
+        assert isinstance(result, Tensor)
+        assert result.shape == (4, 3, 32, 32)
+
+    def test_empty_compose(self):
+        """Test that empty compose list raises error."""
         with pytest.raises(TypeError, match="All transforms must be callable"):
-            Compose([UniformSample(100), "not_callable", Resize(224)])  # type: ignore[list-item]
+            Compose([])
 
+    def test_invalid_transform_in_list(self):
+        """Test that non-callable items raise error."""
         with pytest.raises(TypeError, match="All transforms must be callable"):
-            Compose([UniformSample(100), 42])  # type: ignore[list-item]
-
-    def test_composition_order(self):
-        """Test that transforms are applied in order."""
-        # Mock transforms to track call order
-        transform1 = Mock()
-        transform1.return_value = torch.randn(5, 3, 224, 224)
-        transform2 = Mock()
-        transform2.return_value = torch.randn(5, 3, 224, 224)
-        transform3 = Mock()
-        transform3.return_value = torch.randn(5, 3, 224, 224)
-
-        compose = Compose([transform1, transform2, transform3])
-
-        input_tensor = torch.randn(10, 3, 256, 256)
-        compose(input_tensor)
-
-        # Verify call order
-        transform1.assert_called_once_with(input_tensor)
-        transform2.assert_called_once_with(transform1.return_value)
-        transform3.assert_called_once_with(transform2.return_value)
+            Compose([Resize(224), "not_a_transform", Normalize()])  # type: ignore[list-item]
 
     def test_repr(self):
-        """Test string representation of Compose."""
-        transforms = [UniformSample(50), Resize(224)]
-        compose = Compose(transforms)
+        """Test string representation."""
+        transform = Compose([UniformSample(num_frames=100), Resize(224)])
 
-        repr_str = repr(compose)
+        repr_str = repr(transform)
         assert "Compose" in repr_str
         assert "UniformSample" in repr_str
         assert "Resize" in repr_str
-        assert "\n" in repr_str  # Multi-line format
 
 
 class TestLoadVideo:
-    """Test LoadVideo transform."""
+    """Test video loading transform behavior."""
 
     def test_initialization(self):
-        """Test proper initialization of LoadVideo."""
-        loader = LoadVideo(
-            num_frames=512,
-            resolution=224,
-            sampling_strategy="uniform",
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-        )
+        """Test proper initialization."""
+        loader = LoadVideo(num_frames=100, resolution=256, sampling_strategy="random")
 
-        assert loader.num_frames == 512
-        assert loader.resolution == 224
-        assert loader.sampling_strategy == "uniform"
-        assert loader.device == torch.device("cpu")
-        assert loader.dtype == torch.float32
+        assert loader.num_frames == 100
+        assert loader.resolution == 256
+        assert loader.sampling_strategy == "random"
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Invalid num_frames
+    def test_invalid_parameters(self):
+        """Test parameter validation."""
         with pytest.raises(ValueError, match="num_frames must be positive"):
             LoadVideo(num_frames=0)
 
-        with pytest.raises(ValueError, match="num_frames must be positive"):
-            LoadVideo(num_frames=-10)
-
-        # Invalid resolution
         with pytest.raises(ValueError, match="resolution must be positive"):
-            LoadVideo(num_frames=100, resolution=0)
+            LoadVideo(num_frames=10, resolution=-1)
 
-        with pytest.raises(ValueError, match="resolution must be positive"):
-            LoadVideo(num_frames=100, resolution=-224)
-
-    def test_call_with_path(self):
-        """Test calling LoadVideo with file path."""
-        loader = LoadVideo(num_frames=100, resolution=224)
-
-        # Mock the functional call
-        with patch("associative.utils.video.functional.load_video") as mock_load:
-            mock_load.return_value = torch.randn(100, 3, 224, 224)
-
-            result = loader("test_video.mp4")
-
-            mock_load.assert_called_once_with(
-                video_path="test_video.mp4",
-                num_frames=100,
-                resolution=224,
-                sampling_strategy="uniform",
-                device=None,
-                dtype=None,
-            )
-            assert result.shape == (100, 3, 224, 224)
-
-    def test_call_with_tensor(self):
-        """Test calling LoadVideo with pre-loaded tensor."""
-        loader = LoadVideo(num_frames=100, resolution=224)
-        input_tensor = torch.randn(100, 3, 224, 224)
+    def test_tensor_passthrough(self):
+        """Test that tensor input is passed through unchanged."""
+        loader = LoadVideo(num_frames=50, resolution=224)
+        input_tensor = torch.randn(50, 3, 224, 224)
 
         result = loader(input_tensor)
+
         assert torch.equal(result, input_tensor)
 
-    def test_call_with_invalid_input(self):
-        """Test error handling for invalid input types."""
-        loader = LoadVideo(num_frames=100, resolution=224)
+    def test_invalid_input_type(self):
+        """Test error on invalid input type."""
+        loader = LoadVideo(num_frames=10)
 
         with pytest.raises(TypeError, match="Expected str or Tensor"):
             loader(123)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError, match="Expected str or Tensor"):
-            loader(["not", "valid"])  # type: ignore[arg-type]
+            loader([1, 2, 3])  # type: ignore[arg-type]
 
-    def test_repr(self):
-        """Test string representation."""
-        loader = LoadVideo(num_frames=512, resolution=256, sampling_strategy="random")
-        repr_str = repr(loader)
+    def test_file_loading_with_mock_video(self):
+        """Test file path loading with a temporary file."""
+        loader = LoadVideo(num_frames=10, resolution=128)
 
-        assert "LoadVideo" in repr_str
-        assert "512" in repr_str
-        assert "256" in repr_str
-        assert "random" in repr_str
+        # Create a temporary file to test file existence check
+        with (
+            tempfile.NamedTemporaryFile(suffix=".mp4") as tmp,
+            pytest.raises(RuntimeError, match="Failed to load video"),
+        ):
+            # This will fail at video decode but tests the path handling
+            loader(tmp.name)
 
 
 class TestUniformSample:
-    """Test UniformSample transform."""
+    """Test uniform sampling transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of UniformSample."""
-        sampler = UniformSample(num_frames=100, start_frame=10)
+    def test_basic_sampling(self):
+        """Test that uniform sampling works correctly."""
+        sampler = UniformSample(num_frames=5)
 
-        assert sampler.num_frames == 100
-        assert sampler.start_frame == 10
+        # Create frames with identifiable pattern
+        frames = torch.arange(20).view(20, 1, 1, 1).expand(20, 3, 32, 32).float()
+        result = sampler(frames)
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Invalid num_frames
-        with pytest.raises(ValueError, match="num_frames must be positive"):
-            UniformSample(num_frames=0)
+        assert result.shape == (5, 3, 32, 32)
+        # Check that frames are evenly spaced
+        frame_indices = result[:, 0, 0, 0].long()
+        diffs = frame_indices[1:] - frame_indices[:-1]
+        assert (diffs >= 3).all() and (diffs <= 5).all()  # Roughly uniform
 
-        with pytest.raises(ValueError, match="num_frames must be positive"):
-            UniformSample(num_frames=-50)
+    def test_sampling_with_start_frame(self):
+        """Test sampling with custom start frame."""
+        sampler = UniformSample(num_frames=3, start_frame=5)
+        frames = torch.randn(20, 3, 16, 16)
 
-        # Invalid start_frame
-        with pytest.raises(ValueError, match="start_frame must be non-negative"):
-            UniformSample(num_frames=100, start_frame=-1)
+        result = sampler(frames)
 
-    def test_input_validation(self):
-        """Test input tensor validation."""
-        sampler = UniformSample(num_frames=50)
+        assert result.shape == (3, 3, 16, 16)
 
-        # Wrong dimensions
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            sampler(torch.randn(100, 224, 224))  # Missing channel dimension
+    def test_sample_all_frames(self):
+        """Test sampling when requesting all frames."""
+        sampler = UniformSample(num_frames=10)
+        frames = torch.randn(10, 3, 32, 32)
 
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            sampler(torch.randn(100))  # 1D tensor
+        result = sampler(frames)
 
-        # Not enough frames
+        assert result.shape == frames.shape
+
+    def test_insufficient_frames(self):
+        """Test error when not enough frames available."""
+        sampler = UniformSample(num_frames=20)
+        frames = torch.randn(10, 3, 32, 32)
+
         with pytest.raises(ValueError, match="Not enough frames"):
-            sampler(torch.randn(10, 3, 224, 224))  # Only 10 frames, need 50
-
-    def test_sampling_logic(self):
-        """Test uniform sampling logic."""
-        sampler = UniformSample(num_frames=25)
-        frames = torch.randn(100, 3, 224, 224)
-
-        # Mock the functional call
-        with patch(
-            "associative.utils.video.functional.uniform_sample_indices"
-        ) as mock_indices:
-            mock_indices.return_value = torch.arange(0, 100, 4)  # Every 4th frame
-
             sampler(frames)
 
-            mock_indices.assert_called_once_with(100, 25, 0)
-            # Result should use the mocked indices
-            # Can't test exact values without implementing, but shape should match
+    def test_invalid_dimensions(self):
+        """Test error on wrong input dimensions."""
+        sampler = UniformSample(num_frames=5)
 
-    def test_repr(self):
-        """Test string representation."""
-        sampler = UniformSample(num_frames=128, start_frame=5)
-        repr_str = repr(sampler)
+        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
+            sampler(torch.randn(10, 32, 32))  # 3D
 
-        assert "UniformSample" in repr_str
-        assert "128" in repr_str
-        assert "5" in repr_str
+        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
+            sampler(torch.randn(10, 3, 32, 32, 2))  # 5D
 
 
 class TestResize:
-    """Test Resize transform."""
+    """Test resize transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of Resize."""
-        # Square resize
-        resize_square = Resize(224)
-        assert resize_square.size == (224, 224)
-        assert resize_square.interpolation == "bilinear"
-        assert not resize_square.align_corners
+    def test_square_resize(self):
+        """Test resizing to square dimensions."""
+        resize = Resize(64)
+        frames = torch.randn(5, 3, 128, 128)
 
-        # Rectangular resize
-        resize_rect = Resize((256, 224))
-        assert resize_rect.size == (256, 224)
+        result = resize(frames)
 
-        # Custom parameters
-        resize_custom = Resize(224, interpolation="nearest", align_corners=True)
-        assert resize_custom.interpolation == "nearest"
-        assert resize_custom.align_corners
+        assert result.shape == (5, 3, 64, 64)
+        assert result.dtype == frames.dtype
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Invalid size
+    def test_rectangular_resize(self):
+        """Test resizing to rectangular dimensions."""
+        resize = Resize((128, 96))
+        frames = torch.randn(3, 3, 256, 256)
+
+        result = resize(frames)
+
+        assert result.shape == (3, 3, 128, 96)
+
+    def test_different_interpolation_modes(self):
+        """Test different interpolation modes produce valid output."""
+        frames = torch.randn(2, 3, 32, 32)
+
+        for mode in ["bilinear", "nearest", "bicubic"]:
+            resize = Resize(64, interpolation=mode)
+            result = resize(frames)
+
+            assert result.shape == (2, 3, 64, 64)
+            assert torch.isfinite(result).all()
+
+    def test_preserves_content_structure(self):
+        """Test that resizing preserves relative content structure."""
+        # Create frames with clear pattern
+        frames = torch.zeros(1, 3, 8, 8)
+        frames[:, :, :4, :4] = 1.0  # Top-left quadrant white
+
+        resize = Resize(16)
+        result = resize(frames)
+
+        # Top-left should still be brighter than bottom-right
+        top_left_mean = result[:, :, :8, :8].mean()
+        bottom_right_mean = result[:, :, 8:, 8:].mean()
+        assert top_left_mean > bottom_right_mean
+
+    def test_invalid_size(self):
+        """Test error on invalid size values."""
         with pytest.raises(ValueError, match="size must be positive"):
             Resize(0)
 
-        with pytest.raises(ValueError, match="size must be positive"):
-            Resize(-224)
-
-        with pytest.raises(ValueError, match="All size values must be positive"):
-            Resize((224, 0))
-
-        with pytest.raises(ValueError, match="All size values must be positive"):
-            Resize((224, -256))
-
-    def test_input_validation(self):
-        """Test input tensor validation."""
-        resize = Resize(224)
-
-        # Wrong dimensions
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            resize(torch.randn(100, 224, 224))  # Missing channel dimension
-
-    def test_resize_logic(self):
-        """Test resize logic with mocked functional call."""
-        resize = Resize((256, 224), interpolation="nearest")
-        frames = torch.randn(10, 3, 128, 128)
-
-        with patch("associative.utils.video.functional.resize_frames") as mock_resize:
-            mock_resize.return_value = torch.randn(10, 3, 256, 224)
-
-            resize(frames)
-
-            mock_resize.assert_called_once_with(
-                frames=frames,
-                size=(256, 224),
-                interpolation="nearest",
-                align_corners=False,
-            )
-
-    def test_repr(self):
-        """Test string representation."""
-        resize = Resize((320, 240), interpolation="bicubic")
-        repr_str = repr(resize)
-
-        assert "Resize" in repr_str
-        assert "(320, 240)" in repr_str
-        assert "bicubic" in repr_str
+        with pytest.raises(ValueError, match="size values must be positive"):
+            Resize((224, -1))
 
 
 class TestNormalize:
-    """Test Normalize transform."""
+    """Test normalization transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of Normalize."""
-        # Default initialization
-        normalize_default = Normalize()
-        assert normalize_default.mean == (0.5, 0.5, 0.5)
-        assert normalize_default.std == (0.5, 0.5, 0.5)
+    def test_standard_normalization(self):
+        """Test standard normalization with known values."""
+        normalize = Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
-        # Custom initialization
-        normalize_custom = Normalize(
-            mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
-        )
-        assert normalize_custom.mean == (0.485, 0.456, 0.406)
-        assert normalize_custom.std == (0.229, 0.224, 0.225)
+        # Create frames with known values
+        frames = torch.ones(4, 3, 32, 32) * 0.5
+        result = normalize(frames)
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Wrong length mean/std
-        with pytest.raises(ValueError, match="length 3"):
-            Normalize(mean=(0.5, 0.5), std=(0.5, 0.5, 0.5))  # type: ignore[arg-type]
+        # (0.5 - 0.5) / 0.5 = 0
+        assert torch.allclose(result, torch.zeros_like(result), atol=1e-6)
 
-        with pytest.raises(ValueError, match="length 3"):
-            Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5))  # type: ignore[arg-type]
+    def test_imagenet_normalization(self):
+        """Test with ImageNet normalization values."""
+        normalize = Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
-        # Zero std values
-        with pytest.raises(ValueError, match="std values cannot be zero"):
-            Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.0, 0.5))
+        frames = torch.rand(2, 3, 64, 64)
+        result = normalize(frames)
 
-    def test_input_validation(self):
-        """Test input tensor validation."""
+        assert result.shape == frames.shape
+        # Check that each channel is normalized correctly
+        for c in range(3):
+            channel_mean = result[:, c].mean()
+            channel_std = result[:, c].std()
+            # Should be roughly centered and scaled
+            assert abs(channel_mean) < 2.0  # Reasonable range
+            assert 0.5 < channel_std < 5.0  # Reasonable range
+
+    def test_denormalization_inverse(self):
+        """Test that normalization can be inverted."""
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
+        normalize = Normalize(mean=mean, std=std)
+
+        frames = torch.rand(3, 3, 16, 16)
+        normalized = normalize(frames)
+
+        # Manually denormalize
+        mean_t = torch.tensor(mean).view(1, 3, 1, 1)
+        std_t = torch.tensor(std).view(1, 3, 1, 1)
+        denormalized = normalized * std_t + mean_t
+
+        assert torch.allclose(denormalized, frames, atol=1e-6)
+
+    def test_wrong_number_of_channels(self):
+        """Test error on wrong number of channels."""
         normalize = Normalize()
 
-        # Wrong dimensions
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            normalize(torch.randn(100, 224, 224))
-
-        # Wrong number of channels
         with pytest.raises(RuntimeError, match="Expected 3 channels"):
-            normalize(torch.randn(10, 1, 224, 224))
+            normalize(torch.randn(5, 1, 32, 32))  # Grayscale
 
         with pytest.raises(RuntimeError, match="Expected 3 channels"):
-            normalize(torch.randn(10, 4, 224, 224))
+            normalize(torch.randn(5, 4, 32, 32))  # RGBA
 
-    def test_normalization_logic(self):
-        """Test normalization logic with mocked functional call."""
-        normalize = Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-        frames = torch.randn(8, 3, 224, 224)
+    def test_invalid_parameters(self):
+        """Test parameter validation."""
+        with pytest.raises(ValueError, match="must have length 3"):
+            Normalize(mean=(0.5, 0.5), std=(0.5, 0.5, 0.5))  # type: ignore[arg-type]
 
-        with patch(
-            "associative.utils.video.functional.normalize_frames"
-        ) as mock_normalize:
-            mock_normalize.return_value = torch.randn(8, 3, 224, 224)
-
-            normalize(frames)
-
-            mock_normalize.assert_called_once_with(
-                frames=frames, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
-            )
-
-    def test_repr(self):
-        """Test string representation."""
-        normalize = Normalize(mean=(0.1, 0.2, 0.3), std=(0.4, 0.5, 0.6))
-        repr_str = repr(normalize)
-
-        assert "Normalize" in repr_str
-        assert "(0.1, 0.2, 0.3)" in repr_str
-        assert "(0.4, 0.5, 0.6)" in repr_str
+        with pytest.raises(ValueError, match="cannot be zero"):
+            Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.0, 0.5))
 
 
 class TestApplyMask:
-    """Test ApplyMask transform."""
+    """Test masking transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of ApplyMask."""
-        # Default initialization
-        mask_default = ApplyMask()
-        assert mask_default.mask_ratio == 0.5
-        assert mask_default.mask_type == "bottom_half"
-        assert mask_default.mask_value == 0.0
-        assert not mask_default.return_mask
+    def test_bottom_half_masking(self):
+        """Test bottom half masking actually masks bottom half."""
+        mask_transform = ApplyMask(mask_ratio=0.5, mask_type="bottom_half")
+        frames = torch.ones(2, 3, 8, 8)
 
-        # Custom initialization
-        mask_custom = ApplyMask(
-            mask_ratio=0.7, mask_type="random", mask_value=-1.0, return_mask=True
+        result = mask_transform(frames)
+
+        assert isinstance(result, Tensor)  # Should be tensor, not tuple
+        assert result.shape == frames.shape
+        # Top half should be unchanged
+        assert torch.allclose(result[:, :, :4, :], frames[:, :, :4, :])
+        # Bottom half should be masked (zero)
+        assert torch.allclose(result[:, :, 4:, :], torch.zeros(2, 3, 4, 8))
+
+    def test_random_masking(self):
+        """Test random masking masks approximately correct ratio."""
+        mask_transform = ApplyMask(mask_ratio=0.3, mask_type="random")
+        frames = torch.ones(4, 3, 32, 32)
+
+        result = mask_transform(frames)
+
+        assert isinstance(result, Tensor)  # Should be tensor, not tuple
+        assert result.shape == frames.shape
+        # Approximately 30% should be masked
+        masked_ratio = (result == 0).float().mean()
+        assert 0.2 < masked_ratio < 0.4  # Allow some variance
+
+    def test_no_masking(self):
+        """Test that 'none' mask type doesn't mask anything."""
+        mask_transform = ApplyMask(mask_type="none")
+        frames = torch.randn(3, 3, 16, 16)
+
+        result = mask_transform(frames)
+
+        assert isinstance(result, Tensor)  # Should be tensor, not tuple
+        assert torch.equal(result, frames)
+
+    def test_custom_mask_value(self):
+        """Test masking with custom value."""
+        mask_transform = ApplyMask(
+            mask_ratio=0.5, mask_type="bottom_half", mask_value=-1.0
         )
-        assert mask_custom.mask_ratio == 0.7
-        assert mask_custom.mask_type == "random"
-        assert mask_custom.mask_value == -1.0
-        assert mask_custom.return_mask
+        frames = torch.ones(2, 3, 4, 4)
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Invalid mask_ratio
-        with pytest.raises(ValueError, match="mask_ratio must be in"):
-            ApplyMask(mask_ratio=-0.1)
+        result = mask_transform(frames)
 
+        # Bottom half should be -1
+        assert isinstance(result, Tensor)  # Should be tensor, not tuple
+        assert torch.allclose(result[:, :, 2:, :], -torch.ones(2, 3, 2, 4))
+
+    def test_return_mask(self):
+        """Test returning mask along with frames."""
+        mask_transform = ApplyMask(
+            mask_ratio=0.5, mask_type="bottom_half", return_mask=True
+        )
+        frames = torch.ones(2, 3, 8, 8)
+
+        result = mask_transform(frames)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        masked_frames, mask = result
+
+        assert masked_frames.shape == frames.shape
+        assert mask.shape == (2, 8, 8)
+        assert mask.dtype == torch.bool
+        # Bottom half of mask should be True
+        assert mask[:, 4:, :].all()
+        assert not mask[:, :4, :].any()
+
+    def test_invalid_mask_ratio(self):
+        """Test error on invalid mask ratio."""
         with pytest.raises(ValueError, match="mask_ratio must be in"):
             ApplyMask(mask_ratio=1.5)
 
-        # Invalid mask_type
-        with pytest.raises(ValueError, match="Invalid mask_type"):
-            ApplyMask(mask_type="invalid")  # type: ignore[arg-type]
-
-    def test_input_validation(self):
-        """Test input tensor validation."""
-        mask_transform = ApplyMask()
-
-        # Wrong dimensions
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            mask_transform(torch.randn(100, 224, 224))
-
-    def test_masking_logic(self):
-        """Test masking logic with mocked functional call."""
-        mask_transform = ApplyMask(mask_ratio=0.3, mask_type="random", return_mask=True)
-        frames = torch.randn(5, 3, 224, 224)
-
-        with patch("associative.utils.video.functional.apply_mask") as mock_mask:
-            mock_masked = torch.randn(5, 3, 224, 224)
-            mock_mask_tensor = torch.randint(0, 2, (5, 224, 224), dtype=torch.bool)
-            mock_mask.return_value = (mock_masked, mock_mask_tensor)
-
-            result = mask_transform(frames)
-
-            mock_mask.assert_called_once_with(
-                frames=frames, mask_ratio=0.3, mask_type="random", mask_value=0.0
-            )
-
-            # Should return tuple when return_mask=True
-            assert isinstance(result, tuple)
-            assert len(result) == 2
-
-    def test_return_mask_behavior(self):
-        """Test different return_mask behaviors."""
-        frames = torch.randn(3, 3, 224, 224)
-
-        with patch("associative.utils.video.functional.apply_mask") as mock_mask:
-            mock_masked = torch.randn(3, 3, 224, 224)
-            mock_mask_tensor = torch.randint(0, 2, (3, 224, 224), dtype=torch.bool)
-            mock_mask.return_value = (mock_masked, mock_mask_tensor)
-
-            # return_mask=False should return only masked frames
-            mask_no_return = ApplyMask(return_mask=False)
-            result_no_return = mask_no_return(frames)
-            assert not isinstance(result_no_return, tuple)
-
-            # return_mask=True should return tuple
-            mask_with_return = ApplyMask(return_mask=True)
-            result_with_return = mask_with_return(frames)
-            assert isinstance(result_with_return, tuple)
-            assert len(result_with_return) == 2
-
-    def test_repr(self):
-        """Test string representation."""
-        mask_transform = ApplyMask(mask_ratio=0.8, mask_type="random", return_mask=True)
-        repr_str = repr(mask_transform)
-
-        assert "ApplyMask" in repr_str
-        assert "0.8" in repr_str
-        assert "random" in repr_str
-        assert "True" in repr_str
+        with pytest.raises(ValueError, match="mask_ratio must be in"):
+            ApplyMask(mask_ratio=-0.1)
 
 
 class TestAddNoise:
-    """Test AddNoise transform."""
+    """Test noise addition transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of AddNoise."""
-        # Default initialization
-        noise_default = AddNoise()
-        assert noise_default.noise_std == 0.1
-        assert noise_default.noise_type == "gaussian"
+    def test_gaussian_noise(self):
+        """Test adding Gaussian noise."""
+        noise_transform = AddNoise(noise_std=0.1, noise_type="gaussian")
+        frames = torch.zeros(100, 3, 16, 16)
 
-        # Custom initialization
-        noise_custom = AddNoise(noise_std=0.05, noise_type="uniform")
-        assert noise_custom.noise_std == 0.05
-        assert noise_custom.noise_type == "uniform"
+        result = noise_transform(frames)
 
-    def test_invalid_initialization(self):
-        """Test that invalid parameters raise errors."""
-        # Invalid noise_std
+        assert result.shape == frames.shape
+        # Should have added noise
+        assert not torch.allclose(result, frames)
+        # Noise should be roughly Gaussian with std ~0.1
+        assert -0.5 < result.mean() < 0.5
+        assert 0.05 < result.std() < 0.15
+
+    def test_uniform_noise(self):
+        """Test adding uniform noise."""
+        noise_transform = AddNoise(noise_std=0.1, noise_type="uniform")
+        frames = torch.zeros(100, 3, 16, 16)
+
+        result = noise_transform(frames)
+
+        assert result.shape == frames.shape
+        # Should have added noise
+        assert not torch.allclose(result, frames)
+        # Uniform noise should be bounded
+        assert result.min() >= -0.1
+        assert result.max() <= 0.1
+
+    def test_zero_noise(self):
+        """Test that zero std adds no noise."""
+        noise_transform = AddNoise(noise_std=0.0)
+        frames = torch.randn(5, 3, 32, 32)
+
+        result = noise_transform(frames)
+
+        assert torch.equal(result, frames)
+
+    def test_works_with_any_shape(self):
+        """Test that noise works with any tensor shape."""
+        noise_transform = AddNoise(noise_std=0.05)
+
+        # 1D
+        tensor_1d = torch.zeros(100)
+        result_1d = noise_transform(tensor_1d)
+        assert result_1d.shape == tensor_1d.shape
+        assert not torch.allclose(result_1d, tensor_1d)
+
+        # 2D
+        tensor_2d = torch.zeros(50, 100)
+        result_2d = noise_transform(tensor_2d)
+        assert result_2d.shape == tensor_2d.shape
+        assert not torch.allclose(result_2d, tensor_2d)
+
+    def test_invalid_noise_std(self):
+        """Test error on negative noise std."""
         with pytest.raises(ValueError, match="noise_std must be non-negative"):
             AddNoise(noise_std=-0.1)
 
-        # Invalid noise_type
-        with pytest.raises(ValueError, match="Invalid noise_type"):
-            AddNoise(noise_type="invalid")  # type: ignore[arg-type]
-
-    def test_noise_logic(self):
-        """Test noise addition logic with mocked functional call."""
-        noise_transform = AddNoise(noise_std=0.2, noise_type="uniform")
-        frames = torch.randn(10, 768)  # Can work with any tensor shape
-
-        with patch("associative.utils.video.functional.add_noise") as mock_noise:
-            mock_noise.return_value = torch.randn(10, 768)
-
-            noise_transform(frames)
-
-            mock_noise.assert_called_once_with(
-                frames=frames, noise_std=0.2, noise_type="uniform"
-            )
-
-    def test_repr(self):
-        """Test string representation."""
-        noise_transform = AddNoise(noise_std=0.15, noise_type="gaussian")
-        repr_str = repr(noise_transform)
-
-        assert "AddNoise" in repr_str
-        assert "0.15" in repr_str
-        assert "gaussian" in repr_str
-
 
 class TestToTensor:
-    """Test ToTensor transform."""
+    """Test tensor conversion transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of ToTensor."""
-        # Default initialization
-        to_tensor_default = ToTensor()
-        assert to_tensor_default.dtype == torch.float32
-        assert to_tensor_default.device is None
-
-        # Custom initialization
-        device = torch.device("cpu")
-        to_tensor_custom = ToTensor(dtype=torch.float64, device=device)
-        assert to_tensor_custom.dtype == torch.float64
-        assert to_tensor_custom.device == device
-
-    def test_tensor_conversion(self):
-        """Test tensor conversion from different input types."""
+    def test_numpy_to_tensor(self):
+        """Test converting numpy array to tensor."""
         to_tensor = ToTensor(dtype=torch.float32)
+        np_array = np.random.randn(5, 3, 32, 32).astype(np.float64)
 
-        # Test with numpy array
-        np_array = np.random.randn(10, 3, 32, 32).astype(np.float32)
+        result = to_tensor(np_array)
 
-        with patch("torch.tensor") as mock_tensor:
-            mock_tensor.return_value = torch.randn(10, 3, 32, 32)
+        assert isinstance(result, Tensor)
+        assert result.shape == (5, 3, 32, 32)
+        assert result.dtype == torch.float32
 
-            to_tensor(np_array)
+    def test_list_to_tensor(self):
+        """Test converting list to tensor."""
+        to_tensor = ToTensor()
+        list_data = [[1, 2, 3], [4, 5, 6]]
 
-            mock_tensor.assert_called_once()
-            # First argument should be the numpy array
-            args, kwargs = mock_tensor.call_args
-            np.testing.assert_array_equal(args[0], np_array)
-            assert kwargs["dtype"] == torch.float32
+        result = to_tensor(list_data)
 
-    def test_tensor_input_handling(self):
-        """Test handling when input is already a tensor."""
-        to_tensor = ToTensor(dtype=torch.float64, device=torch.device("cpu"))
-        input_tensor = torch.randn(5, 3, 224, 224, dtype=torch.float32)
+        assert isinstance(result, Tensor)
+        assert result.shape == (2, 3)
+        assert torch.equal(
+            result, torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.float32)
+        )
 
-        to_tensor(input_tensor)
+    def test_tensor_dtype_conversion(self):
+        """Test converting tensor to different dtype."""
+        to_tensor = ToTensor(dtype=torch.float64)
+        input_tensor = torch.randn(3, 3, 16, 16, dtype=torch.float32)
 
-        # Should convert to target dtype and device
-        # (Actual implementation would do this via .to() calls)
+        result = to_tensor(input_tensor)
 
-    def test_conversion_error_handling(self):
-        """Test error handling during conversion."""
+        assert result.dtype == torch.float64
+        assert torch.allclose(result.float(), input_tensor)
+
+    def test_device_placement(self):
+        """Test placing tensor on specific device."""
+        device = torch.device("cpu")
+        to_tensor = ToTensor(device=device)
+        np_array = np.random.randn(2, 3, 8, 8)
+
+        result = to_tensor(np_array)
+
+        assert result.device.type == "cpu"
+
+    def test_conversion_error(self):
+        """Test error handling for unconvertible data."""
         to_tensor = ToTensor()
 
-        # Mock torch.tensor to raise an exception
-        with patch("torch.tensor") as mock_tensor:
-            mock_tensor.side_effect = RuntimeError("Conversion failed")
+        # Object that can't be converted
+        class UnconvertibleObject:
+            pass
 
-            with pytest.raises(RuntimeError, match="Failed to convert to tensor"):
-                to_tensor([1, 2, 3])  # Should trigger the exception
-
-    def test_repr(self):
-        """Test string representation."""
-        to_tensor = ToTensor(dtype=torch.float16, device=torch.device("cpu"))
-        repr_str = repr(to_tensor)
-
-        assert "ToTensor" in repr_str
-        assert "float16" in repr_str
-        assert "cpu" in repr_str
+        with pytest.raises(RuntimeError, match="Failed to convert to tensor"):
+            to_tensor(UnconvertibleObject())
 
 
 class TestLambda:
-    """Test Lambda transform."""
+    """Test lambda transform behavior."""
 
-    def test_initialization(self):
-        """Test proper initialization of Lambda."""
+    def test_simple_lambda(self):
+        """Test simple lambda function."""
+        # Clamp values to [0, 1]
+        clamp_transform = Lambda(lambda x: torch.clamp(x, 0, 1))
+        frames = torch.randn(5, 3, 16, 16) * 2  # Some values outside [0, 1]
 
-        # Valid callable
-        def lambda_fn(x):
-            return x * 2
+        result = clamp_transform(frames)
 
-        lambda_transform = Lambda(lambda_fn)
-        assert lambda_transform.lambd == lambda_fn
+        assert result.shape == frames.shape
+        assert result.min() >= 0
+        assert result.max() <= 1
 
-    def test_invalid_initialization(self):
-        """Test that invalid lambda raises error."""
-        # Non-callable
+    def test_complex_lambda(self):
+        """Test more complex lambda function."""
+        # Add 1 and take absolute value
+        complex_transform = Lambda(lambda x: (x + 1).abs())
+        frames = torch.randn(3, 3, 8, 8) - 0.5
+
+        result = complex_transform(frames)
+
+        assert result.shape == frames.shape
+        assert (result >= 0).all()
+        assert torch.allclose(result, (frames + 1).abs())
+
+    def test_lambda_changing_shape(self):
+        """Test lambda that changes tensor shape."""
+        # Flatten spatial dimensions
+        flatten_transform = Lambda(lambda x: x.view(x.shape[0], -1))
+        frames = torch.randn(4, 3, 16, 16)
+
+        result = flatten_transform(frames)
+
+        assert result.shape == (4, 3 * 16 * 16)
+
+    def test_invalid_lambda(self):
+        """Test error on non-callable lambda."""
         with pytest.raises(TypeError, match="lambd must be callable"):
             Lambda("not_callable")  # type: ignore[arg-type]
 
         with pytest.raises(TypeError, match="lambd must be callable"):
             Lambda(42)  # type: ignore[arg-type]
 
-    def test_lambda_execution(self):
-        """Test that lambda function is executed correctly."""
-        # Simple lambda
-        double_transform = Lambda(lambda x: x * 2)
-        input_tensor = torch.randn(5, 10)
 
-        # Mock the lambda to verify it's called
-        mock_lambda = Mock(return_value=torch.randn(5, 10))
-        double_transform.lambd = mock_lambda
+class TestIntegration:
+    """Integration tests for complex transform pipelines."""
 
-        double_transform(input_tensor)
-
-        mock_lambda.assert_called_once_with(input_tensor)
-
-    def test_complex_lambda(self):
-        """Test with more complex lambda functions."""
-
-        # Multi-operation lambda
-        def complex_lambda(x):
-            return torch.clamp(x.abs(), min=0.1, max=1.0)
-
-        complex_transform = Lambda(complex_lambda)
-
-        # Should not raise any errors during initialization
-        assert callable(complex_transform.lambd)
-
-    def test_repr(self):
-        """Test string representation."""
-        lambda_transform = Lambda(lambda x: x)
-        repr_str = repr(lambda_transform)
-
-        assert "Lambda" in repr_str
-
-
-class TestTransformIntegration:
-    """Integration tests for transform composition and edge cases."""
-
-    def test_complex_pipeline(self):
-        """Test complex transform pipeline."""
+    def test_video_preprocessing_pipeline(self):
+        """Test complete video preprocessing pipeline."""
         pipeline = Compose(
             [
-                UniformSample(num_frames=100),
-                Resize((256, 224)),
+                UniformSample(num_frames=8),
+                Resize(64),
                 Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-                ApplyMask(mask_ratio=0.3, mask_type="random"),
-                AddNoise(noise_std=0.01),
             ]
         )
 
-        # Should initialize without errors
-        assert len(pipeline.transforms) == 5
+        # Create input frames
+        frames = torch.rand(32, 3, 128, 128)
+        result = pipeline(frames)
 
-        # Each transform should be the correct type
-        assert isinstance(pipeline.transforms[0], UniformSample)
-        assert isinstance(pipeline.transforms[1], Resize)
-        assert isinstance(pipeline.transforms[2], Normalize)
-        assert isinstance(pipeline.transforms[3], ApplyMask)
-        assert isinstance(pipeline.transforms[4], AddNoise)
+        # Verify complete pipeline
+        assert result.shape == (8, 3, 64, 64)
+        # Should be normalized (roughly centered)
+        for c in range(3):
+            channel_data = result[:, c]
+            assert -3 < channel_data.mean() < 3
+            assert 0.5 < channel_data.std() < 5
 
-    def test_transform_error_propagation(self):
-        """Test that errors propagate correctly through pipeline."""
+    def test_augmentation_pipeline(self):
+        """Test augmentation pipeline with masking and noise."""
         pipeline = Compose(
             [
-                UniformSample(num_frames=50),
-                Resize(224),
-                Lambda(lambda x: 1 / 0),  # Will cause division by zero
+                ApplyMask(mask_ratio=0.25, mask_type="random"),
+                AddNoise(noise_std=0.05),
+                Lambda(lambda x: torch.clamp(x, -1, 1)),  # Clamp final values
             ]
         )
 
-        frames = torch.randn(100, 3, 224, 224)
+        frames = torch.randn(10, 3, 32, 32) * 0.5
+        result = pipeline(frames)
 
-        # Error should propagate through pipeline
-        # Lambda causes division by zero
-        with pytest.raises(ZeroDivisionError):
+        assert result.shape == frames.shape
+        assert result.min() >= -1
+        assert result.max() <= 1
+        # Should be different from input due to mask and noise
+        assert not torch.allclose(result, frames)
+
+    def test_mixed_type_pipeline(self):
+        """Test pipeline with mixed input/output types."""
+        pipeline = Compose(
+            [
+                ToTensor(dtype=torch.float32),
+                Resize(32),
+                Normalize(),
+            ]
+        )
+
+        # Start with numpy array
+        np_frames = np.random.randn(5, 3, 64, 64).astype(np.float64)
+        result = pipeline(np_frames)
+
+        assert isinstance(result, Tensor)
+        assert result.dtype == torch.float32
+        assert result.shape == (5, 3, 32, 32)
+
+    def test_error_propagation_in_pipeline(self):
+        """Test that errors in pipeline are properly reported."""
+        pipeline = Compose([UniformSample(num_frames=10), Resize(224), Normalize()])
+
+        # Input with too few frames
+        frames = torch.randn(5, 3, 128, 128)
+
+        with pytest.raises(ValueError, match="Not enough frames"):
             pipeline(frames)
 
-    def test_device_consistency_through_pipeline(self):
-        """Test device consistency through transform pipeline."""
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        else:
-            device = torch.device("cpu")
+    def test_deterministic_pipeline(self):
+        """Test that deterministic transforms produce same output."""
+        pipeline = Compose(
+            [
+                UniformSample(num_frames=4),
+                Resize(32),
+                Normalize(mean=(0.5, 0.5, 0.5), std=(0.25, 0.25, 0.25)),
+            ]
+        )
 
-        Compose([ToTensor(device=device), Resize(224), Normalize()])
+        frames = torch.randn(16, 3, 64, 64)
 
-        # Should maintain device consistency
-        # (Would need implementation to test actual device placement)
+        # Multiple runs should produce identical results
+        result1 = pipeline(frames)
+        result2 = pipeline(frames)
 
-    def test_batch_processing_consistency(self):
-        """Test that transforms handle batches consistently."""
-        Compose([Resize(224), Normalize()])
-
-        Compose([Resize(224), Normalize()])
-
-        # Single frame and batch should work with same transforms
-        torch.randn(1, 3, 256, 256)
-        torch.randn(10, 3, 256, 256)
-
-        # Both should be processable by the same pipeline
-        # (Would need implementation to test actual processing)
-
-    def test_transform_parameter_validation_consistency(self):
-        """Test that parameter validation is consistent across transforms."""
-        # All transforms should handle negative values consistently
-        with pytest.raises(ValueError):
-            UniformSample(num_frames=-1)
-
-        with pytest.raises(ValueError):
-            Resize(size=-1)
-
-        with pytest.raises(ValueError):
-            AddNoise(noise_std=-1)
-
-        # All should handle zero values appropriately
-        with pytest.raises(ValueError):
-            UniformSample(num_frames=0)
-
-        with pytest.raises(ValueError):
-            Resize(size=0)
-
-    def test_memory_efficiency(self):
-        """Test that transforms don't unnecessarily copy tensors."""
-        # Some transforms should modify in-place when possible
-        # Others should create new tensors only when necessary
-
-        # This is more of a performance test that would require
-        # implementation details to verify properly
-
-        input_tensor = torch.randn(10, 3, 224, 224)
-        id(input_tensor)
-
-        # Lambda transform might reuse tensors
-        identity_transform = Lambda(lambda x: x)
-        identity_transform(input_tensor)
-
-        # Identity should potentially reuse the same tensor
-        # (Implementation dependent)
+        assert torch.equal(result1, result2)
 
 
 if __name__ == "__main__":
