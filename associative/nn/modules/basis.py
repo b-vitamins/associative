@@ -455,3 +455,386 @@ def create_basis(basis_type: str, num_basis: int, **kwargs) -> BasisFunction:
     if basis_type == "fourier":
         return FourierBasis(num_basis, **kwargs)
     raise ValueError(f"{basis_type} not recognized")
+
+
+class ContinuousCompression(nn.Module):
+    """Continuous compression via ridge regression on basis functions.
+
+    Implements the compression mechanism from MET paper Section 3.2:
+    - Projects discrete sequences onto continuous basis functions
+    - Uses ridge regression to find optimal coefficients
+    - Enables reconstruction at arbitrary time points
+
+    The compression operator R = (FF^T + λI)^(-1)F maps sequences
+    from L points to M basis coefficients where M << L.
+
+    Attributes:
+        basis: Basis function module (rectangular, Gaussian, etc.)
+        regularization: Ridge regression regularization parameter λ
+        compression_dim: Number of basis functions M
+        cached_design_matrix: Optional cached F for efficiency
+        cached_regression_operator: Optional cached R for efficiency
+
+    Performance Requirements:
+        - MUST use Cholesky decomposition for (FF^T + λI)^(-1): O(M³)
+        - MUST cache R matrix when seq_len is fixed to avoid O(M³) per forward
+        - MUST batch matrix operations: compress all heads/dims simultaneously
+        - MUST use torch.compile for basis evaluation loops
+        - Target: <5ms for M=100, L=1024, batch=32 on V100
+
+    Memory Requirements:
+        - Design matrix F: MxL floats (cache if L fixed)
+        - Regression operator R: MxL floats (cache if affordable)
+        - Gram matrix FF^T: MxM floats (temporary, small)
+        - Peak memory: O(MxL + batchxHxYxL) where H=heads, Y=qk_dim
+        - MUST use in-place operations for large tensors
+
+    Hardware Optimization:
+        - GPU: Use cuBLAS for matrix multiplications (automatic via PyTorch)
+        - Rectangular basis: Optimize via sparse operations (most entries zero)
+        - CPU: Use MKL for Cholesky (torch.linalg.cholesky)
+        - Mixed precision: Keep basis evaluation in fp32, compression in fp16
+        - Flash Attention v2 compatible: Ensure M x M fits in SRAM (M≤128 ideal)
+    """
+
+    def __init__(
+        self,
+        basis: BasisFunction,
+        regularization: float = 0.01,
+        cache_operators: bool = False,
+    ):
+        """Initialize continuous compression module.
+
+        Args:
+            basis: Basis function instance for compression
+            regularization: Ridge regression regularization λ > 0
+            cache_operators: Whether to cache F and R matrices
+
+        Raises:
+            ValueError: If regularization <= 0
+
+        Note:
+            Caching operators speeds up repeated compressions on
+            sequences of the same length but uses more memory.
+        """
+        super().__init__()
+        if regularization <= 0:
+            raise ValueError(f"regularization must be positive, got {regularization}")
+
+        self.basis = basis
+        self.regularization = regularization
+        self.compression_dim = basis.num_basis
+        self.cache_operators = cache_operators
+        # Legacy cache fields for backward compatibility
+        self.cached_design_matrix = None
+        self.cached_regression_operator = None
+        # New intelligent cache dictionaries
+        self._design_matrix_cache = {}
+        self._regression_operator_cache = {}
+
+    def compute_design_matrix(self, seq_len: int) -> Tensor:
+        """Compute design matrix F for given sequence length.
+
+        The design matrix F[j, A] = ψ_j(A/L) evaluates each basis
+        function at normalized time points.
+
+        Args:
+            seq_len: Length L of the sequence to compress
+
+        Returns:
+            Design matrix of shape (M, L) where M is compression_dim
+
+        Note:
+            Time points are normalized to [0, 1] via t_A = A/L.
+            Results may be cached if cache_operators=True.
+        """
+        # Check new intelligent cache first
+        if seq_len in self._design_matrix_cache:
+            return self._design_matrix_cache[seq_len]
+
+        # Check legacy cache if enabled (for backward compatibility)
+        if (
+            self.cache_operators
+            and self.cached_design_matrix is not None
+            and self.cached_design_matrix.shape[1] == seq_len
+        ):
+            return self.cached_design_matrix
+
+        # Compute normalized time points: t_A = A/L for A in [0, L-1]
+        time_points = torch.arange(seq_len, dtype=torch.float32) / seq_len
+
+        # Evaluate basis functions: F[j, A] = ψ_j(A/L)
+        design_matrix = self.basis.evaluate(time_points)
+
+        # Cache in new intelligent cache
+        self._design_matrix_cache[seq_len] = design_matrix
+
+        # Cache in legacy cache if enabled (for backward compatibility)
+        if self.cache_operators:
+            self.cached_design_matrix = design_matrix
+
+        return design_matrix
+
+    def compute_regression_operator(self, design_matrix: Tensor) -> Tensor:
+        """Compute ridge regression operator R.
+
+        R = (FF^T + λI)^(-1)F enables efficient compression via
+        matrix multiplication: B = RK^T.
+
+        Args:
+            design_matrix: F matrix of shape (M, L)
+
+        Returns:
+            Regression operator of shape (M, L)
+
+        Note:
+            Uses Cholesky decomposition for numerical stability.
+            Complexity: O(M^3) for inversion + O(M^2 L) for multiplication.
+
+        Performance Contract:
+            - MUST use torch.linalg.cholesky_ex for GPU efficiency
+            - MUST check info tensor for numerical issues
+            - SHOULD use double precision for ill-conditioned matrices
+            - MUST cache result if called with same L repeatedly
+        """
+        m, seq_length = design_matrix.shape
+
+        # Create cache key from design matrix shape
+        cache_key = (m, seq_length)
+
+        # Check new intelligent cache first
+        if cache_key in self._regression_operator_cache:
+            return self._regression_operator_cache[cache_key]
+
+        # Check legacy cache if enabled (for backward compatibility)
+        if (
+            self.cache_operators
+            and self.cached_regression_operator is not None
+            and self.cached_regression_operator.shape == (m, seq_length)
+        ):
+            return self.cached_regression_operator
+
+        # Compute Gram matrix: FF^T
+        gram_matrix = design_matrix @ design_matrix.T
+
+        # Add regularization: FF^T + λI
+        # Use small epsilon if regularization is exactly 0 to avoid singularity
+        effective_regularization = (
+            self.regularization if self.regularization > 0 else 1e-6
+        )
+        regularized_gram = gram_matrix + effective_regularization * torch.eye(
+            m, dtype=gram_matrix.dtype, device=gram_matrix.device
+        )
+
+        # Use Cholesky decomposition for numerical stability
+        # Solve (FF^T + λI) @ R = F  =>  R = (FF^T + λI)^(-1) @ F
+        chol, info = torch.linalg.cholesky_ex(regularized_gram)
+
+        # Check for numerical issues
+        if info.max() > 0:
+            # Fall back to direct solve if Cholesky fails
+            regression_operator = torch.linalg.solve(regularized_gram, design_matrix)
+        else:
+            # Use Cholesky solve for efficiency
+            regression_operator = torch.cholesky_solve(design_matrix, chol)
+
+        # Cache in new intelligent cache
+        self._regression_operator_cache[cache_key] = regression_operator
+
+        # Cache in legacy cache if enabled (for backward compatibility)
+        if self.cache_operators:
+            self.cached_regression_operator = regression_operator
+
+        return regression_operator
+
+    def compress(
+        self,
+        keys: Tensor,
+        seq_len: int | None = None,
+    ) -> Tensor:
+        """Compress sequences to basis coefficients.
+
+        Computes B = RK^T where K are the keys to compress.
+
+        Args:
+            keys: Tensor of shape (..., H, L) or (..., Y, H, L) to compress
+            seq_len: Optional sequence length (inferred from keys if None)
+
+        Returns:
+            Coefficients of shape (..., H, M) or (..., Y, H, M)
+
+        Example:
+            >>> compression = ContinuousCompression(basis, regularization=0.01)
+            >>> keys = torch.randn(8, 64, 1024)  # (heads, dim, seq_len)
+            >>> coeffs = compression.compress(keys)  # (8, 64, M)
+
+        Note:
+            Handles both 3D (H, Y, L) and 4D (Y, H, L) key tensors.
+            The compression preserves all batch dimensions.
+            Uses cached operators when seq_len is consistent for performance.
+        """
+        # Infer sequence length from keys if not provided
+        actual_seq_len: int
+        actual_seq_len = int(keys.shape[-1]) if seq_len is None else seq_len
+
+        # Get design matrix and regression operator (uses caching internally)
+        design_matrix = self.compute_design_matrix(actual_seq_len)
+        regression_operator = self.compute_regression_operator(design_matrix)
+
+        # Compute B = R @ K^T
+        # keys: (..., Y, H, L) -> transpose to (..., Y, L, H) for einsum
+        # regression_operator: (M, L)
+        # Result: (..., Y, M, H) -> transpose to (..., Y, H, M)
+
+        # Transpose last two dimensions: (..., Y, H, L) -> (..., Y, L, H)
+        keys_transposed = keys.transpose(-2, -1)
+
+        # Apply regression operator: (M, L) @ (..., Y, L, H) -> (..., Y, M, H)
+        coefficients = torch.einsum(
+            "ml,...lh->...mh", regression_operator, keys_transposed
+        )
+
+        # Transpose back to get (..., Y, H, M)
+        return coefficients.transpose(-2, -1)
+
+    def reconstruct(
+        self,
+        coefficients: Tensor,
+        time_points: Tensor,
+    ) -> Tensor:
+        """Reconstruct continuous functions from coefficients.
+
+        Computes K̄(t) = Σ_j B_j ψ_j(t) for arbitrary time points.
+
+        Args:
+            coefficients: Basis coefficients of shape (..., M)
+            time_points: Time points of shape (T,) or scalar
+
+        Returns:
+            Reconstructed values of shape (..., T) or (...,) for scalar t
+
+        Example:
+            >>> t = torch.linspace(0, 1, 100)
+            >>> reconstructed = compression.reconstruct(coeffs, t)
+
+        Note:
+            Time points should be in the basis function domain.
+            Supports arbitrary resolution reconstruction.
+        """
+        # Evaluate basis functions at time points
+        # basis_values: (M, T) or (M,) for scalar
+        basis_values = self.basis.evaluate(time_points)
+
+        # Compute K̄(t) = Σ_j B_j ψ_j(t) = B^T @ ψ(t)
+        # coefficients: (..., M), basis_values: (M, T) -> (..., T)
+        # or coefficients: (..., M), basis_values: (M,) -> (...,)
+
+        if time_points.dim() == 0:  # scalar time point
+            # basis_values: (M,), coefficients: (..., M) -> (...)
+            reconstructed = torch.einsum("...m,m->...", coefficients, basis_values)
+        else:
+            # basis_values: (M, T), coefficients: (..., M) -> (..., T)
+            reconstructed = torch.einsum("...m,mt->...t", coefficients, basis_values)
+
+        return reconstructed
+
+    def compute_continuous_scores(
+        self,
+        queries: Tensor,
+        compressed_keys: Tensor,
+        time_points: Tensor | None = None,
+    ) -> Tensor:
+        """Compute continuous attention scores s(t) = K̄(t)^T Q.
+
+        Evaluates query-key similarities at specified time points
+        using the compressed representation.
+
+        Args:
+            queries: Query tensor of shape (..., Y, H, L_q)
+            compressed_keys: Compressed keys of shape (..., Y, H, M)
+            time_points: Evaluation points (default: linspace(0, 1, 50))
+
+        Returns:
+            Scores of shape (..., H, L_q, T) where T is num time points
+
+        Note:
+            This is used for computing partition functions in MET.
+            Default time points suitable for numerical integration.
+        """
+        # Use default time points if not provided
+        if time_points is None:
+            time_points = torch.linspace(0, 1, 50, device=queries.device)
+
+        # Reconstruct keys at time points: K̄(t)
+        # compressed_keys: (..., Y, H, M), time_points: (T,)
+        # reconstructed_keys: (..., Y, H, T)
+        reconstructed_keys = self.reconstruct(compressed_keys, time_points)
+
+        # Compute scores s(t) = Q^T @ K̄(t)
+        # queries: (..., Y, H, L_q), reconstructed_keys: (..., Y, H, T)
+        # scores: (..., H, L_q, T)
+        return torch.einsum("...yhq,...yht->...hqt", queries, reconstructed_keys)
+
+    def forward(
+        self,
+        keys: Tensor,
+        queries: Tensor | None = None,
+        return_coefficients: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        """Compress keys and optionally compute continuous scores.
+
+        Args:
+            keys: Keys to compress of shape (..., H, L)
+            queries: Optional queries for score computation
+            return_coefficients: Whether to return compression coefficients
+
+        Returns:
+            If queries provided and return_coefficients=False:
+                Continuous scores of shape (..., H, L_q, T)
+            If queries provided and return_coefficients=True:
+                Tuple of (scores, coefficients)
+            If no queries:
+                Compressed coefficients of shape (..., H, M)
+
+        Note:
+            Main entry point for continuous compression in attention.
+        """
+        # Compress keys to basis coefficients
+        coefficients = self.compress(keys)
+
+        # If no queries, just return coefficients
+        if queries is None:
+            return coefficients
+
+        # Compute continuous scores
+        scores = self.compute_continuous_scores(queries, coefficients)
+
+        # Return based on return_coefficients flag
+        if return_coefficients:
+            return scores, coefficients
+        return scores
+
+    def clear_cache(self) -> None:
+        """Clear all cached matrices to free memory.
+
+        This method clears both the new intelligent caches and legacy caches.
+        Useful when switching to different sequence lengths or when memory
+        is constrained.
+
+        Note:
+            After clearing cache, next compress() call will recompute matrices.
+        """
+        self._design_matrix_cache.clear()
+        self._regression_operator_cache.clear()
+        self.cached_design_matrix = None
+        self.cached_regression_operator = None
+
+    def extra_repr(self) -> str:
+        """String representation of module configuration."""
+        cache_info = f"cached_seqs={len(self._design_matrix_cache)}"
+        return (
+            f"compression_dim={self.compression_dim}, "
+            f"regularization={self.regularization}, "
+            f"basis_type={self.basis.__class__.__name__}, "
+            f"{cache_info}"
+        )
