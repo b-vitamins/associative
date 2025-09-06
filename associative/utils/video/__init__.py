@@ -7,7 +7,7 @@ Follows PyTorch design patterns for familiarity and composability.
 Usage:
     >>> import associative.utils.video as VU
     >>> import associative.utils.video.functional as VF
-    >>> from associative.utils.video import transforms, loaders, embeddings, metrics
+    >>> from associative.utils.video import transforms, embeddings, metrics
 
     # Functional API
     >>> frames = VF.load_video("path/to/video.mp4", num_frames=512)
@@ -20,9 +20,6 @@ Usage:
     ...     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ... ])
 
-    # Data loading
-    >>> loader = loaders.VideoLoader(dataset, transform=transform, batch_size=32)
-
     # Embedding extraction
     >>> embedder = embeddings.EVAClipEmbedder(model_name="eva_clip_vit_g_14")
     >>> embeds = embedder(frames)
@@ -34,7 +31,6 @@ Usage:
 
 # Import main classes for convenience
 from .embeddings import EmbeddingExtractor, EVAClipEmbedder, register_embedder
-from .loaders import BatchProcessor, VideoDataLoader
 from .metrics import CosineSimilarity, ReconstructionMetrics
 from .transforms import ApplyMask, Compose, Normalize, Resize, UniformSample
 
@@ -43,10 +39,10 @@ __version__ = "0.1.0"
 
 # Main exports
 __all__ = [
-    "ApplyMask",
-    "BatchProcessor",
     # Transforms
+    "ApplyMask",
     "Compose",
+    # Metrics
     "CosineSimilarity",
     "EVAClipEmbedder",
     # Core classes
@@ -55,7 +51,6 @@ __all__ = [
     "ReconstructionMetrics",
     "Resize",
     "UniformSample",
-    "VideoDataLoader",
     # Registration
     "register_embedder",
 ]
