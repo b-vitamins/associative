@@ -439,7 +439,11 @@ class TestAudioReconstructionMetrics:
         # Reset
         metrics.reset()
 
-        # Should be able to compute after reset (with zero/default values)
+        # Add new data after reset to avoid warning about computing before update
+        audio2 = torch.randn(8000)
+        metrics.update(audio2, audio2)
+
+        # Should be able to compute after reset with new values
         results = metrics.compute()
         assert "sdr" in results
 
@@ -519,7 +523,8 @@ class TestMetricIntegration:
 
             # Process batches
             for _ in range(3):
-                clean = torch.randn(4000)
+                # Use longer audio to avoid STOI warning about insufficient frames
+                clean = torch.randn(16000)  # 1 second at 16kHz
                 # Simulate improving predictions
                 noise_scale = 0.3 * (1 - epoch * 0.3)
                 noisy = clean + torch.randn_like(clean) * noise_scale
