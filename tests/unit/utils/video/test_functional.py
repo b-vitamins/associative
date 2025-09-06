@@ -1,534 +1,515 @@
-"""Comprehensive tests for video functional operations."""
+"""Tests for video functional operations.
 
+Tests focus on behavior and contracts, not implementation details.
+Each function should handle edge cases gracefully and produce correct outputs.
+"""
+
+import tempfile
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 
-import associative.utils.video.functional as video_functional
+from associative.utils.video import functional as F
 
 
 class TestVideoLoading:
-    """Test video loading functional operations."""
+    """Test video loading operations."""
 
-    def test_load_video_parameter_validation(self):
-        """Test parameter validation for load_video."""
-        # Test invalid num_frames
+    def test_load_video_validates_arguments(self):
+        """Test that load_video validates its arguments properly."""
+        # Invalid num_frames
         with pytest.raises(ValueError, match="num_frames must be positive"):
-            video_functional.load_video("test.mp4", num_frames=0)
+            F.load_video("test.mp4", num_frames=0)
 
         with pytest.raises(ValueError, match="num_frames must be positive"):
-            video_functional.load_video("test.mp4", num_frames=-5)
+            F.load_video("test.mp4", num_frames=-5)
 
-        # Test invalid resolution
+        # Invalid resolution
         with pytest.raises(ValueError, match="resolution must be positive"):
-            video_functional.load_video("test.mp4", num_frames=10, resolution=0)
+            F.load_video("test.mp4", num_frames=10, resolution=0)
 
-        with pytest.raises(ValueError, match="resolution must be positive"):
-            video_functional.load_video("test.mp4", num_frames=10, resolution=-224)
-
-        # Test invalid sampling strategy
+        # Invalid sampling strategy
         with pytest.raises(ValueError, match="Invalid sampling_strategy"):
-            video_functional.load_video(
-                "test.mp4",
-                num_frames=10,
-                sampling_strategy="invalid",  # type: ignore[arg-type]
-            )
+            F.load_video("test.mp4", num_frames=10, sampling_strategy="invalid")  # type: ignore
 
-    def test_load_video_file_errors(self):
-        """Test file-related errors in load_video."""
-        # Test nonexistent file
-        with pytest.raises(FileNotFoundError, match="doesn't exist"):
-            video_functional.load_video("nonexistent_video.mp4", num_frames=10)
+        # Nonexistent file
+        with pytest.raises(FileNotFoundError, match="Video file not found"):
+            F.load_video("nonexistent.mp4", num_frames=10)
 
-    def test_load_video_output_contract(self):
-        """Test expected output format of load_video."""
-        # This test would run when implementation is available
-        if hasattr(video_functional.load_video, "_implemented"):
-            with patch("associative.utils.video.functional.VideoReader") as mock_reader:
-                # Mock video reader
-                mock_instance = MagicMock()
-                mock_instance.__len__.return_value = 100
-                mock_instance.__getitem__.return_value.asnumpy.return_value = (
-                    torch.randint(0, 255, (224, 224, 3), dtype=torch.uint8).numpy()
+    @patch("associative.utils.video.functional.VideoReader")
+    def test_load_video_uniform_sampling(self, mock_reader):
+        """Test video loading with uniform sampling."""
+        # Create a temporary video file path
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+            # Mock video reader
+            mock_instance = MagicMock()
+            mock_instance.__len__.return_value = 100
+            # Create mock frames
+            mock_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            mock_instance.__getitem__.return_value.asnumpy.return_value = mock_frame
+            mock_reader.return_value = mock_instance
+
+            frames = F.load_video(tmp.name, num_frames=10, resolution=224)
+
+            # Check output shape and properties
+            assert frames.shape == (10, 3, 224, 224)
+            assert frames.dtype == torch.float32
+            assert -1.5 <= frames.min() <= 1.5  # Normalized range
+            assert -1.5 <= frames.max() <= 1.5
+
+    @patch("associative.utils.video.functional.VideoReader")
+    def test_load_video_different_strategies(self, mock_reader):
+        """Test different sampling strategies."""
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+            mock_instance = MagicMock()
+            mock_instance.__len__.return_value = 50
+            mock_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            mock_instance.__getitem__.return_value.asnumpy.return_value = mock_frame
+            mock_reader.return_value = mock_instance
+
+            # Test each strategy
+            for strategy in ["uniform", "random", "sequential"]:
+                frames = F.load_video(
+                    tmp.name,
+                    num_frames=5,
+                    resolution=128,
+                    sampling_strategy=strategy,  # type: ignore
                 )
-                mock_reader.return_value = mock_instance
-
-                frames = video_functional.load_video(
-                    "test.mp4", num_frames=50, resolution=224
-                )
-
-                # Verify output contract
-                assert frames.shape == (50, 3, 224, 224)
-                assert frames.dtype == torch.float32
-                assert frames.min() >= -1.0 and frames.max() <= 1.0  # Normalized
+                assert frames.shape == (5, 3, 128, 128)
 
 
 class TestMasking:
-    """Test video masking operations."""
+    """Test masking operations."""
 
-    def test_apply_mask_parameter_validation(self):
-        """Test parameter validation for apply_mask."""
+    def test_apply_mask_validates_inputs(self):
+        """Test input validation for apply_mask."""
         frames = torch.randn(10, 3, 224, 224)
 
-        # Test invalid mask_ratio
+        # Invalid mask_ratio
         with pytest.raises(ValueError, match="mask_ratio must be in"):
-            video_functional.apply_mask(frames, mask_ratio=-0.1)
+            F.apply_mask(frames, mask_ratio=-0.1)
 
         with pytest.raises(ValueError, match="mask_ratio must be in"):
-            video_functional.apply_mask(frames, mask_ratio=1.5)
+            F.apply_mask(frames, mask_ratio=1.5)
 
-        # Test invalid mask_type
-        with pytest.raises(ValueError, match="Unknown mask type"):
-            video_functional.apply_mask(frames, mask_type="invalid")  # type: ignore[arg-type]
+        # Invalid mask_type
+        with pytest.raises(ValueError, match="Invalid mask_type"):
+            F.apply_mask(frames, mask_type="invalid")  # type: ignore
 
-    def test_apply_mask_input_validation(self):
-        """Test input tensor validation for apply_mask."""
-        # Test wrong dimensions
+        # Wrong dimensions
         with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            video_functional.apply_mask(torch.randn(10, 224, 224), mask_ratio=0.5)
+            F.apply_mask(torch.randn(10, 224, 224), mask_ratio=0.5)
 
-        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
-            video_functional.apply_mask(torch.randn(10, 3, 224, 224, 5), mask_ratio=0.5)
+    def test_apply_mask_bottom_half(self):
+        """Test bottom half masking."""
+        frames = torch.ones(4, 3, 8, 8)
+        masked_frames, mask = F.apply_mask(
+            frames, mask_ratio=0.5, mask_type="bottom_half"
+        )
 
-    def test_apply_mask_output_contract(self):
-        """Test expected output format of apply_mask."""
-        frames = torch.randn(8, 3, 224, 224)
+        assert masked_frames.shape == frames.shape
+        assert mask.shape == (4, 8, 8)
+        assert mask.dtype == torch.bool
 
-        if hasattr(video_functional.apply_mask, "_implemented"):
-            masked_frames, mask = video_functional.apply_mask(
-                frames, mask_ratio=0.5, mask_type="bottom_half"
-            )
+        # Bottom half should be masked
+        assert mask[:, 4:, :].all()  # Bottom 4 rows masked
+        assert not mask[:, :4, :].any()  # Top 4 rows not masked
 
-            # Verify output shapes
-            assert masked_frames.shape == frames.shape
-            assert mask.shape == (8, 224, 224)
-            assert mask.dtype == torch.bool
+        # Masked regions should be zero
+        assert (masked_frames[:, :, 4:, :] == 0).all()
 
-            # Test different mask types preserve shape
-            for mask_type in ["bottom_half", "random", "none"]:
-                masked, m = video_functional.apply_mask(
-                    frames,
-                    mask_ratio=0.3,
-                    mask_type=mask_type,  # type: ignore[arg-type]
-                )
-                assert masked.shape == frames.shape
-                assert m.shape == (8, 224, 224)
-                assert m.dtype == torch.bool
+    def test_apply_mask_random(self):
+        """Test random masking."""
+        torch.manual_seed(42)
+        frames = torch.ones(10, 3, 32, 32)
+        masked_frames, mask = F.apply_mask(frames, mask_ratio=0.3, mask_type="random")
+
+        assert masked_frames.shape == frames.shape
+        assert mask.shape == (10, 32, 32)
+
+        # Approximately 30% should be masked
+        mask_ratio_actual = mask.float().mean().item()
+        assert 0.25 <= mask_ratio_actual <= 0.35
+
+    def test_apply_mask_none(self):
+        """Test no masking."""
+        frames = torch.randn(5, 3, 16, 16)
+        masked_frames, mask = F.apply_mask(frames, mask_ratio=0.5, mask_type="none")
+
+        assert torch.allclose(masked_frames, frames)
+        assert not mask.any()  # No masking applied
 
 
 class TestNoise:
     """Test noise addition operations."""
 
-    def test_add_noise_parameter_validation(self):
-        """Test parameter validation for add_noise."""
+    def test_add_noise_validates_inputs(self):
+        """Test input validation for add_noise."""
         frames = torch.randn(10, 512)
 
-        # Test invalid noise_std
+        # Invalid noise_std
         with pytest.raises(ValueError, match="noise_std must be non-negative"):
-            video_functional.add_noise(frames, noise_std=-0.1)
+            F.add_noise(frames, noise_std=-0.1)
 
-        # Test invalid noise_type
+        # Invalid noise_type
         with pytest.raises(ValueError, match="Invalid noise_type"):
-            video_functional.add_noise(frames, noise_type="invalid")  # type: ignore[arg-type]
+            F.add_noise(frames, noise_type="invalid")  # type: ignore
 
-    def test_add_noise_output_contract(self):
-        """Test expected output format of add_noise."""
-        input_tensor = torch.randn(16, 768)
+    def test_add_gaussian_noise(self):
+        """Test Gaussian noise addition."""
+        torch.manual_seed(42)
+        frames = torch.zeros(100, 512)
+        noisy = F.add_noise(frames, noise_std=0.1, noise_type="gaussian")
 
-        if hasattr(video_functional.add_noise, "_implemented"):
-            noise_std = 0.1
-            noisy = video_functional.add_noise(
-                input_tensor, noise_std=noise_std, noise_type="gaussian"
-            )
+        assert noisy.shape == frames.shape
+        assert not torch.allclose(noisy, frames)
 
-            # Verify output contract
-            assert noisy.shape == input_tensor.shape
-            assert noisy.dtype == input_tensor.dtype
+        # Check noise statistics
+        noise = noisy - frames
+        assert abs(noise.mean().item()) < 0.02  # Should be near 0
+        assert 0.08 <= noise.std().item() <= 0.12  # Should be near 0.1
 
-            # With non-zero std, output should differ from input
-            if noise_std > 0:
-                assert not torch.allclose(noisy, input_tensor)
+    def test_add_uniform_noise(self):
+        """Test uniform noise addition."""
+        torch.manual_seed(42)
+        frames = torch.zeros(100, 512)
+        noisy = F.add_noise(frames, noise_std=0.1, noise_type="uniform")
 
-            # Test different noise types
-            for noise_type in ["gaussian", "uniform"]:
-                noisy = video_functional.add_noise(
-                    input_tensor,
-                    noise_std=0.05,
-                    noise_type=noise_type,  # type: ignore[arg-type]
-                )
-                assert noisy.shape == input_tensor.shape
+        assert noisy.shape == frames.shape
+        assert not torch.allclose(noisy, frames)
+
+        # Check noise is in expected range
+        noise = noisy - frames
+        assert noise.min() >= -0.15
+        assert noise.max() <= 0.15
+
+    def test_no_noise_with_zero_std(self):
+        """Test that zero std adds no noise."""
+        frames = torch.randn(10, 256)
+        noisy = F.add_noise(frames, noise_std=0.0)
+        assert torch.allclose(noisy, frames)
 
 
 class TestSampling:
     """Test frame sampling operations."""
 
-    def test_uniform_sample_indices_parameter_validation(self):
-        """Test parameter validation for uniform_sample_indices."""
-        # Test invalid parameters
+    def test_uniform_sample_indices_validates_inputs(self):
+        """Test input validation for uniform_sample_indices."""
+        # Invalid num_frames
         with pytest.raises(ValueError, match="num_frames must be positive"):
-            video_functional.uniform_sample_indices(100, num_frames=0)
+            F.uniform_sample_indices(100, num_frames=0)
 
-        with pytest.raises(ValueError, match="num_frames must be positive"):
-            video_functional.uniform_sample_indices(100, num_frames=-10)
+        # Invalid start_frame
+        with pytest.raises(ValueError, match="must be non-negative"):
+            F.uniform_sample_indices(100, num_frames=10, start_frame=-1)
 
-        with pytest.raises(ValueError, match="negative values"):
-            video_functional.uniform_sample_indices(100, num_frames=10, start_frame=-1)
+        # Too many frames requested
+        with pytest.raises(ValueError, match="Cannot sample"):
+            F.uniform_sample_indices(50, num_frames=100)
 
-        with pytest.raises(ValueError, match="num_frames > total_frames"):
-            video_functional.uniform_sample_indices(50, num_frames=100)
+    def test_uniform_sample_indices_basic(self):
+        """Test basic uniform sampling."""
+        indices = F.uniform_sample_indices(100, num_frames=10)
 
-    def test_uniform_sample_indices_output_contract(self):
-        """Test expected output format of uniform_sample_indices."""
-        if hasattr(video_functional.uniform_sample_indices, "_implemented"):
-            indices = video_functional.uniform_sample_indices(1000, 100, start_frame=0)
+        assert indices.shape == (10,)
+        assert indices.dtype == torch.long
+        assert indices[0] >= 0
+        assert indices[-1] <= 99
 
-            # Verify output contract
-            assert indices.shape == (100,)
-            assert indices.dtype == torch.long
-            assert torch.all(indices >= 0)
-            assert torch.all(indices < 1000)
+        # Should be monotonically increasing
+        assert (indices[1:] >= indices[:-1]).all()
 
-            # Should be roughly uniformly spaced
-            diffs = indices[1:] - indices[:-1]
-            assert torch.all(diffs > 0)  # Monotonically increasing
+    def test_uniform_sample_indices_with_offset(self):
+        """Test uniform sampling with start frame."""
+        indices = F.uniform_sample_indices(200, num_frames=20, start_frame=50)
 
-            # Test with start_frame
-            indices_offset = video_functional.uniform_sample_indices(
-                1000, 50, start_frame=100
-            )
-            assert torch.all(indices_offset >= 100)
+        assert indices.shape == (20,)
+        assert indices[0] >= 50
+        assert indices[-1] <= 199
+
+    def test_uniform_sample_edge_cases(self):
+        """Test edge cases for uniform sampling."""
+        # Sample all frames
+        indices = F.uniform_sample_indices(10, num_frames=10)
+        assert indices.shape == (10,)
+
+        # Sample single frame
+        indices = F.uniform_sample_indices(100, num_frames=1)
+        assert indices.shape == (1,)
 
 
 class TestResizing:
     """Test frame resizing operations."""
 
-    def test_resize_frames_parameter_validation(self):
-        """Test parameter validation for resize_frames."""
+    def test_resize_frames_validates_inputs(self):
+        """Test input validation for resize_frames."""
         frames = torch.randn(10, 3, 128, 128)
 
-        # Test invalid size
-        with pytest.raises(ValueError, match="non-positive values"):
-            video_functional.resize_frames(frames, size=0)
+        # Invalid size
+        with pytest.raises(ValueError, match="Size must be positive"):
+            F.resize_frames(frames, size=0)
 
-        with pytest.raises(ValueError, match="non-positive values"):
-            video_functional.resize_frames(frames, size=(224, -1))
+        with pytest.raises(ValueError, match="Size must be positive"):
+            F.resize_frames(frames, size=(224, -1))
 
-        # Test invalid interpolation
-        with pytest.raises(ValueError, match="unsupported interpolation"):
-            video_functional.resize_frames(frames, size=224, interpolation="invalid")
+        # Invalid interpolation
+        with pytest.raises(ValueError, match="Unsupported interpolation"):
+            F.resize_frames(frames, size=224, interpolation="invalid")
 
-    def test_resize_frames_input_validation(self):
-        """Test input validation for resize_frames."""
-        # Test wrong dimensions
-        with pytest.raises(RuntimeError, match="wrong number of dimensions"):
-            video_functional.resize_frames(torch.randn(10, 128, 128), size=224)
+        # Wrong dimensions
+        with pytest.raises(RuntimeError, match="Expected 4D tensor"):
+            F.resize_frames(torch.randn(10, 128, 128), size=224)
 
-    def test_resize_frames_output_contract(self):
-        """Test expected output format of resize_frames."""
+    def test_resize_frames_square(self):
+        """Test square resizing."""
         frames = torch.randn(5, 3, 128, 128)
+        resized = F.resize_frames(frames, size=224)
 
-        if hasattr(video_functional.resize_frames, "_implemented"):
-            # Test square resize
-            resized = video_functional.resize_frames(frames, size=224)
-            assert resized.shape == (5, 3, 224, 224)
+        assert resized.shape == (5, 3, 224, 224)
+        assert resized.dtype == frames.dtype
 
-            # Test rectangular resize
-            resized_rect = video_functional.resize_frames(frames, size=(256, 224))
-            assert resized_rect.shape == (5, 3, 256, 224)
+    def test_resize_frames_rectangular(self):
+        """Test rectangular resizing."""
+        frames = torch.randn(3, 3, 128, 128)
+        resized = F.resize_frames(frames, size=(256, 192))
 
-            # Test different interpolation modes
-            for interp in ["bilinear", "nearest", "bicubic"]:
-                resized = video_functional.resize_frames(
-                    frames, size=224, interpolation=interp
-                )
-                assert resized.shape == (5, 3, 224, 224)
+        assert resized.shape == (3, 3, 256, 192)
+
+    def test_resize_frames_interpolation_modes(self):
+        """Test different interpolation modes."""
+        frames = torch.randn(2, 3, 64, 64)
+
+        for mode in ["bilinear", "nearest", "bicubic"]:
+            resized = F.resize_frames(frames, size=128, interpolation=mode)
+            assert resized.shape == (2, 3, 128, 128)
+
+    def test_resize_preserves_content_structure(self):
+        """Test that resizing preserves content structure."""
+        # Create a simple pattern
+        frames = torch.zeros(1, 3, 8, 8)
+        frames[:, :, :4, :4] = 1.0  # Top-left quadrant
+
+        resized = F.resize_frames(frames, size=16)
+
+        # Top-left should still be brighter
+        top_left = resized[:, :, :8, :8].mean()
+        bottom_right = resized[:, :, 8:, 8:].mean()
+        assert top_left > bottom_right
 
 
 class TestNormalization:
-    """Test frame normalization operations."""
+    """Test normalization operations."""
 
-    def test_normalize_frames_parameter_validation(self):
-        """Test parameter validation for normalize_frames."""
+    def test_normalize_frames_validates_inputs(self):
+        """Test input validation for normalize_frames."""
         frames = torch.randn(10, 3, 224, 224)
 
-        # Test invalid mean/std length
-        with pytest.raises(ValueError, match="don't match number of channels"):
-            video_functional.normalize_frames(
-                frames,
-                mean=(0.5, 0.5),  # type: ignore[arg-type]
-                std=(0.5, 0.5, 0.5),  # type: ignore[arg-type]
-            )
+        # Wrong number of mean/std values
+        with pytest.raises(ValueError, match="Mean and std must have 3 values"):
+            F.normalize_frames(frames, mean=(0.5, 0.5), std=(0.5, 0.5, 0.5))  # type: ignore
 
-        with pytest.raises(ValueError, match="don't match number of channels"):
-            video_functional.normalize_frames(
-                frames,
-                mean=(0.5, 0.5, 0.5),
-                std=(0.5, 0.5),  # type: ignore[arg-type]
-            )
+        # Zero std
+        with pytest.raises(RuntimeError, match="Standard deviation cannot be zero"):
+            F.normalize_frames(frames, mean=(0.5, 0.5, 0.5), std=(0.5, 0.0, 0.5))
 
-        # Test zero std
-        with pytest.raises(RuntimeError, match="std value is zero"):
-            video_functional.normalize_frames(
-                frames, mean=(0.5, 0.5, 0.5), std=(0.5, 0.0, 0.5)
-            )
+    def test_normalize_frames_basic(self):
+        """Test basic normalization."""
+        frames = torch.ones(4, 3, 32, 32) * 0.5
+        normalized = F.normalize_frames(
+            frames, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)
+        )
 
-    def test_normalize_frames_output_contract(self):
-        """Test expected output format of normalize_frames."""
-        frames = torch.rand(8, 3, 224, 224)  # [0, 1] range
+        assert normalized.shape == frames.shape
+        assert torch.allclose(normalized, torch.zeros_like(normalized))
 
-        if hasattr(video_functional.normalize_frames, "_implemented"):
-            normalized = video_functional.normalize_frames(
-                frames, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)
-            )
+    def test_normalize_frames_inverts_correctly(self):
+        """Test that normalization can be inverted."""
+        frames = torch.rand(2, 3, 16, 16)
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
 
-            # Verify output contract
-            assert normalized.shape == frames.shape
-            assert normalized.dtype == frames.dtype
+        normalized = F.normalize_frames(frames, mean=mean, std=std)
 
-            # Should be roughly in [-1, 1] range for this normalization
-            assert normalized.min() >= -1.1  # Small tolerance for floating point
-            assert normalized.max() <= 1.1
+        # Manually invert
+        mean_t = torch.tensor(mean).view(1, 3, 1, 1)
+        std_t = torch.tensor(std).view(1, 3, 1, 1)
+        denormalized = normalized * std_t + mean_t
+
+        assert torch.allclose(denormalized, frames, atol=1e-6)
 
 
 class TestSimilarity:
-    """Test similarity computation operations."""
+    """Test similarity computation."""
 
-    def test_compute_cosine_similarity_parameter_validation(self):
-        """Test parameter validation for compute_cosine_similarity."""
+    def test_cosine_similarity_validates_inputs(self):
+        """Test input validation for cosine similarity."""
         pred = torch.randn(32, 512)
 
-        # Test shape mismatch
-        with pytest.raises(ValueError, match="different shapes"):
-            video_functional.compute_cosine_similarity(pred, torch.randn(32, 256))
+        # Shape mismatch
+        with pytest.raises(ValueError, match="must have same shape"):
+            F.compute_cosine_similarity(pred, torch.randn(32, 256))
 
-        with pytest.raises(ValueError, match="different shapes"):
-            video_functional.compute_cosine_similarity(pred, torch.randn(16, 512))
+        # Empty tensors
+        with pytest.raises(
+            RuntimeError, match="Cannot compute similarity on empty tensors"
+        ):
+            F.compute_cosine_similarity(torch.empty(0, 512), torch.empty(0, 512))
 
-    def test_compute_cosine_similarity_edge_cases(self):
-        """Test edge cases for compute_cosine_similarity."""
-        # Test empty tensors
-        with pytest.raises(RuntimeError, match="empty"):
-            video_functional.compute_cosine_similarity(
-                torch.empty(0, 512), torch.empty(0, 512)
-            )
+    def test_cosine_similarity_identical_vectors(self):
+        """Test cosine similarity of identical vectors."""
+        vec = torch.randn(10, 256)
+        similarity = F.compute_cosine_similarity(vec, vec, dim=-1)
 
-        # Test zero vectors (should handle gracefully with eps)
-        if hasattr(video_functional.compute_cosine_similarity, "_implemented"):
-            zero_pred = torch.zeros(2, 10)
-            zero_target = torch.zeros(2, 10)
-            similarity = video_functional.compute_cosine_similarity(
-                zero_pred, zero_target, eps=1e-8
-            )
-            assert torch.isfinite(similarity).all()  # Should not be NaN/inf
+        assert similarity.shape == (10,)
+        assert torch.allclose(similarity, torch.ones(10), atol=1e-6)
 
-    def test_compute_cosine_similarity_output_contract(self):
-        """Test expected output format of compute_cosine_similarity."""
-        pred = torch.randn(16, 768)
-        target = torch.randn(16, 768)
+    def test_cosine_similarity_orthogonal_vectors(self):
+        """Test cosine similarity of orthogonal vectors."""
+        vec1 = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        vec2 = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+        similarity = F.compute_cosine_similarity(vec1, vec2, dim=-1)
 
-        if hasattr(video_functional.compute_cosine_similarity, "_implemented"):
-            similarity = video_functional.compute_cosine_similarity(
-                pred, target, dim=-1
-            )
+        assert torch.allclose(similarity, torch.zeros(2), atol=1e-6)
 
-            # Verify output contract
-            assert similarity.shape == (16,)
-            assert similarity.dtype == pred.dtype
-            assert torch.all(similarity >= -1.0)
-            assert torch.all(similarity <= 1.0)
+    def test_cosine_similarity_numerical_stability(self):
+        """Test numerical stability with zero vectors."""
+        zero_vec = torch.zeros(5, 100)
+        nonzero_vec = torch.randn(5, 100)
 
-            # Test different dimensions
-            similarity_dim0 = video_functional.compute_cosine_similarity(
-                pred, target, dim=0
-            )
-            assert similarity_dim0.shape == (768,)
+        # Should handle zero vectors gracefully
+        similarity = F.compute_cosine_similarity(zero_vec, nonzero_vec, eps=1e-8)
+        assert torch.isfinite(similarity).all()
 
 
 class TestUtilityFunctions:
     """Test utility tensor operations."""
 
-    def test_stack_video_frames_validation(self):
-        """Test validation for stack_video_frames."""
-        # Test empty list
-        with pytest.raises(RuntimeError, match="empty"):
-            video_functional.stack_video_frames([])
+    def test_stack_video_frames(self):
+        """Test stacking video frames."""
+        frames1 = torch.randn(10, 3, 32, 32)
+        frames2 = torch.randn(10, 3, 32, 32)
+        frames3 = torch.randn(10, 3, 32, 32)
 
-        # Test inconsistent shapes
-        frames1 = torch.randn(10, 3, 224, 224)
-        frames2 = torch.randn(10, 3, 256, 256)  # Different size
+        stacked = F.stack_video_frames([frames1, frames2, frames3])
 
-        with pytest.raises(ValueError, match="inconsistent shapes"):
-            video_functional.stack_video_frames([frames1, frames2])
+        assert stacked.shape == (3, 10, 3, 32, 32)
+        assert torch.allclose(stacked[0], frames1)
+        assert torch.allclose(stacked[1], frames2)
+        assert torch.allclose(stacked[2], frames3)
 
-    def test_stack_video_frames_output_contract(self):
-        """Test expected output format of stack_video_frames."""
-        if hasattr(video_functional.stack_video_frames, "_implemented"):
-            frames1 = torch.randn(50, 3, 224, 224)
-            frames2 = torch.randn(50, 3, 224, 224)
-            frames3 = torch.randn(50, 3, 224, 224)
+    def test_stack_video_frames_validates_inputs(self):
+        """Test input validation for stack_video_frames."""
+        # Empty list
+        with pytest.raises(RuntimeError, match="Cannot stack empty list"):
+            F.stack_video_frames([])
 
-            stacked = video_functional.stack_video_frames([frames1, frames2, frames3])
+        # Inconsistent shapes
+        frames1 = torch.randn(10, 3, 32, 32)
+        frames2 = torch.randn(10, 3, 64, 64)
+        with pytest.raises(ValueError, match="All frames must have same shape"):
+            F.stack_video_frames([frames1, frames2])
 
-            # Verify output contract
-            assert stacked.shape == (3, 50, 3, 224, 224)  # (B, N, C, H, W)
-            assert stacked.dtype == frames1.dtype
+    def test_flatten_video_frames(self):
+        """Test flattening video frames."""
+        frames = torch.randn(5, 3, 32, 32)
+        flattened = F.flatten_video_frames(frames)
 
-    def test_flatten_video_frames_output_contract(self):
-        """Test expected output format of flatten_video_frames."""
-        frames = torch.randn(100, 3, 224, 224)
+        assert flattened.shape == (5, 3 * 32 * 32)
+        assert flattened.shape[0] == frames.shape[0]
 
-        if hasattr(video_functional.flatten_video_frames, "_implemented"):
-            flattened = video_functional.flatten_video_frames(frames)
+    def test_reshape_to_frames(self):
+        """Test reshaping flattened vectors to frames."""
+        flattened = torch.randn(8, 3 * 64 * 64)
+        frames = F.reshape_to_frames(flattened, channels=3, height=64, width=64)
 
-            # Verify output contract
-            expected_dim = 3 * 224 * 224
-            assert flattened.shape == (100, expected_dim)
-            assert flattened.dtype == frames.dtype
+        assert frames.shape == (8, 3, 64, 64)
 
-    def test_reshape_to_frames_parameter_validation(self):
-        """Test parameter validation for reshape_to_frames."""
-        # Test incorrect flattened dimension
-        flattened = torch.randn(100, 1000)  # Wrong dimension
+    def test_reshape_to_frames_validates_dimensions(self):
+        """Test dimension validation for reshape_to_frames."""
+        flattened = torch.randn(10, 1000)  # Wrong dimension
 
-        with pytest.raises(ValueError, match="dimension doesn't match"):
-            video_functional.reshape_to_frames(
-                flattened, channels=3, height=224, width=224
-            )
+        with pytest.raises(ValueError, match="Feature dimension.*doesn't match"):
+            F.reshape_to_frames(flattened, channels=3, height=32, width=32)
 
-    def test_reshape_to_frames_output_contract(self):
-        """Test expected output format of reshape_to_frames."""
-        expected_dim = 3 * 224 * 224
-        flattened = torch.randn(50, expected_dim)
+    def test_flatten_reshape_roundtrip(self):
+        """Test that flatten and reshape are inverses."""
+        frames = torch.randn(7, 3, 28, 28)
+        flattened = F.flatten_video_frames(frames)
+        reconstructed = F.reshape_to_frames(flattened, 3, 28, 28)
 
-        if hasattr(video_functional.reshape_to_frames, "_implemented"):
-            frames = video_functional.reshape_to_frames(
-                flattened, channels=3, height=224, width=224
-            )
-
-            # Verify output contract
-            assert frames.shape == (50, 3, 224, 224)
-            assert frames.dtype == flattened.dtype
+        assert torch.allclose(reconstructed, frames)
 
 
-class TestBatchOperations:
-    """Test operations that work with batches."""
+class TestIntegration:
+    """Test combinations of functional operations."""
 
-    def test_batch_consistency(self):
-        """Test that operations handle batches consistently."""
-        # Single frame operations should work with batches
-        if hasattr(video_functional.resize_frames, "_implemented"):
-            single_frame = torch.randn(1, 3, 128, 128)
-            batch_frames = torch.randn(10, 3, 128, 128)
+    def test_resize_and_normalize_pipeline(self):
+        """Test typical preprocessing pipeline."""
+        frames = torch.rand(10, 3, 128, 128)
 
-            single_resized = video_functional.resize_frames(single_frame, size=224)
-            batch_resized = video_functional.resize_frames(batch_frames, size=224)
+        # Resize then normalize
+        resized = F.resize_frames(frames, size=224)
+        normalized = F.normalize_frames(
+            resized, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)
+        )
 
-            assert single_resized.shape == (1, 3, 224, 224)
-            assert batch_resized.shape == (10, 3, 224, 224)
+        assert normalized.shape == (10, 3, 224, 224)
+        assert -2 <= normalized.min() <= 2  # Roughly normalized range
+        assert -2 <= normalized.max() <= 2
+
+    def test_mask_and_noise_pipeline(self):
+        """Test masking followed by noise addition."""
+        frames = torch.ones(5, 3, 16, 16)
+
+        # Apply mask then add noise
+        masked, mask = F.apply_mask(frames, mask_ratio=0.5, mask_type="bottom_half")
+        noisy = F.add_noise(masked, noise_std=0.1)
+
+        assert noisy.shape == frames.shape
+        # Top half should be noisy but around 1
+        top_half_mean = noisy[:, :, :8, :].mean().item()
+        assert 0.9 <= top_half_mean <= 1.1
+
+        # Bottom half should be noisy but around 0
+        bottom_half_mean = noisy[:, :, 8:, :].mean().item()
+        assert -0.1 <= bottom_half_mean <= 0.1
 
     def test_device_consistency(self):
         """Test that operations preserve device placement."""
-        if torch.cuda.is_available():
-            frames_cpu = torch.randn(5, 3, 224, 224)
-            frames_cuda = frames_cpu.cuda()
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
 
-            if hasattr(video_functional.add_noise, "_implemented"):
-                noisy_cpu = video_functional.add_noise(frames_cpu, noise_std=0.1)
-                noisy_cuda = video_functional.add_noise(frames_cuda, noise_std=0.1)
+        frames_cpu = torch.randn(3, 3, 32, 32)
+        frames_gpu = frames_cpu.cuda()
 
-                assert noisy_cpu.device == frames_cpu.device
-                assert noisy_cuda.device == frames_cuda.device
+        # Test various operations
+        resized_cpu = F.resize_frames(frames_cpu, size=64)
+        resized_gpu = F.resize_frames(frames_gpu, size=64)
+        assert resized_cpu.device == frames_cpu.device
+        assert resized_gpu.device == frames_gpu.device
 
-    def test_dtype_consistency(self):
+        noisy_cpu = F.add_noise(frames_cpu, noise_std=0.1)
+        noisy_gpu = F.add_noise(frames_gpu, noise_std=0.1)
+        assert noisy_cpu.device == frames_cpu.device
+        assert noisy_gpu.device == frames_gpu.device
+
+    def test_dtype_preservation(self):
         """Test that operations preserve data types appropriately."""
-        frames_float32 = torch.randn(5, 3, 224, 224, dtype=torch.float32)
-        frames_float64 = torch.randn(5, 3, 224, 224, dtype=torch.float64)
+        frames_f32 = torch.randn(2, 3, 16, 16, dtype=torch.float32)
+        frames_f64 = torch.randn(2, 3, 16, 16, dtype=torch.float64)
 
-        if hasattr(video_functional.normalize_frames, "_implemented"):
-            norm_float32 = video_functional.normalize_frames(frames_float32)
-            norm_float64 = video_functional.normalize_frames(frames_float64)
+        # Most operations should preserve dtype
+        resized_f32 = F.resize_frames(frames_f32, size=32)
+        resized_f64 = F.resize_frames(frames_f64, size=32)
+        assert resized_f32.dtype == torch.float32
+        assert resized_f64.dtype == torch.float64
 
-            assert norm_float32.dtype == torch.float32
-            assert norm_float64.dtype == torch.float64
-
-
-class TestErrorHandling:
-    """Test comprehensive error handling."""
-
-    def test_graceful_degradation(self):
-        """Test that functions fail gracefully with informative errors."""
-        # All parameter validation should use ValueError with descriptive messages
-        with pytest.raises(ValueError):
-            video_functional.load_video(
-                "test.mp4", num_frames=-1
-            )  # Specific error caught above
-
-        # Runtime errors should use RuntimeError
-        with pytest.raises(RuntimeError):
-            video_functional.apply_mask(
-                torch.randn(10, 224, 224), mask_ratio=0.5
-            )  # Wrong dims
-
-    def test_edge_case_handling(self):
-        """Test handling of edge cases."""
-        # Very small tensors
-        tiny_frames = torch.randn(1, 3, 1, 1)
-
-        if hasattr(video_functional.resize_frames, "_implemented"):
-            # Should handle tiny images
-            resized = video_functional.resize_frames(tiny_frames, size=224)
-            assert resized.shape == (1, 3, 224, 224)
-
-        # Very large mask ratios
-        frames = torch.randn(5, 3, 224, 224)
-        if hasattr(video_functional.apply_mask, "_implemented"):
-            # Should handle edge ratios
-            masked_all, mask_all = video_functional.apply_mask(frames, mask_ratio=0.99)
-            assert masked_all.shape == frames.shape
-            assert mask_all.sum() > 0  # Most pixels masked
-
-
-class TestNumericalStability:
-    """Test numerical stability and precision."""
-
-    def test_cosine_similarity_stability(self):
-        """Test numerical stability of cosine similarity."""
-        if hasattr(video_functional.compute_cosine_similarity, "_implemented"):
-            # Very small values (near machine epsilon)
-            tiny_pred = torch.randn(10, 100) * 1e-7
-            tiny_target = torch.randn(10, 100) * 1e-7
-
-            similarity = video_functional.compute_cosine_similarity(
-                tiny_pred, tiny_target, eps=1e-8
-            )
-            assert torch.isfinite(similarity).all()  # Should not overflow/underflow
-
-            # Very large values
-            large_pred = torch.randn(10, 100) * 1e6
-            large_target = torch.randn(10, 100) * 1e6
-
-            similarity_large = video_functional.compute_cosine_similarity(
-                large_pred, large_target
-            )
-            assert torch.isfinite(similarity_large).all()
-
-    def test_normalization_stability(self):
-        """Test numerical stability of normalization."""
-        if hasattr(video_functional.normalize_frames, "_implemented"):
-            # Extreme values
-            extreme_frames = torch.cat(
-                [
-                    torch.ones(2, 3, 224, 224) * 1e6,  # Very large
-                    torch.ones(2, 3, 224, 224) * 1e-6,  # Very small
-                ]
-            )
-
-            normalized = video_functional.normalize_frames(
-                extreme_frames, mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)
-            )
-
-            assert torch.isfinite(normalized).all()
+        normalized_f32 = F.normalize_frames(frames_f32)
+        normalized_f64 = F.normalize_frames(frames_f64)
+        assert normalized_f32.dtype == torch.float32
+        assert normalized_f64.dtype == torch.float64
 
 
 if __name__ == "__main__":

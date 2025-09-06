@@ -17,40 +17,58 @@ from torch import Tensor
 from torch.nn import functional
 
 # Constants for tensor dimensions and channels
-EXPECTED_VIDEO_DIMS = 4  # (N, C, H, W)
+VIDEO_DIMS_4D = 4  # (N, C, H, W)
+VIDEO_DIMS_5D = 5  # (B, N, C, H, W)
 RGB_CHANNELS = 3
-BATCH_VIDEO_DIMS = 5  # (B, N, C, H, W)
 
 
-def _validate_load_video_args(
-    num_frames: int, resolution: int, sampling_strategy: str, video_path: str
+def _validate_video_input(frames: Tensor, expected_dims: int) -> None:
+    """Validate video tensor dimensions.
+
+    Args:
+        frames: Input video tensor
+        expected_dims: Expected number of dimensions (4 or 5)
+
+    Raises:
+        RuntimeError: If dimensions don't match expected
+    """
+    if frames.dim() != expected_dims:
+        raise RuntimeError(
+            f"Expected {expected_dims}D tensor, got {frames.dim()}D. "
+            f"Shape should be {'(N, C, H, W)' if expected_dims == VIDEO_DIMS_4D else '(B, N, C, H, W)'}"
+        )
+
+
+def _validate_load_args(
+    video_path: str, num_frames: int, resolution: int, sampling_strategy: str
 ) -> None:
-    """Validate arguments for load_video function."""
+    """Validate arguments for load_video."""
     if num_frames <= 0:
         raise ValueError("num_frames must be positive")
     if resolution <= 0:
         raise ValueError("resolution must be positive")
     if sampling_strategy not in ["uniform", "random", "sequential"]:
-        raise ValueError("Invalid sampling_strategy")
+        raise ValueError(f"Invalid sampling_strategy: {sampling_strategy}")
     if not os.path.exists(video_path):
-        raise FileNotFoundError(f"{video_path} doesn't exist")
+        raise FileNotFoundError(f"Video file not found: {video_path}")
 
 
-def _get_frame_indices(
+def _get_sampling_indices(
     sampling_strategy: str, total_frames: int, num_frames: int
-) -> torch.Tensor:
+) -> Tensor:
     """Get frame indices based on sampling strategy."""
     if sampling_strategy == "uniform":
         return uniform_sample_indices(total_frames, num_frames)
     if sampling_strategy == "random":
         if num_frames > total_frames:
-            raise ValueError("num_frames exceeds video length")
+            raise ValueError(
+                f"Requested {num_frames} frames but video has {total_frames}"
+            )
         return torch.randperm(total_frames)[:num_frames].sort().values
-    if sampling_strategy == "sequential":
-        if num_frames > total_frames:
-            raise ValueError("num_frames exceeds video length")
-        return torch.arange(0, num_frames)
-    raise ValueError(f"Unknown sampling strategy: {sampling_strategy}")
+    # sequential
+    if num_frames > total_frames:
+        raise ValueError(f"Requested {num_frames} frames but video has {total_frames}")
+    return torch.arange(num_frames)
 
 
 def load_video(
@@ -86,23 +104,24 @@ def load_video(
         torch.Size([512, 3, 224, 224])
     """
     # Validate arguments
-    _validate_load_video_args(num_frames, resolution, sampling_strategy, video_path)
+    _validate_load_args(video_path, num_frames, resolution, sampling_strategy)
 
     # Load video reader
     try:
         vr = VideoReader(video_path)
-        total = len(vr)
+        total_frames = len(vr)
     except Exception as e:
         raise RuntimeError(f"Failed to load video: {e!s}") from e
 
     # Get frame indices
-    indices = _get_frame_indices(sampling_strategy, total, num_frames)
+    indices = _get_sampling_indices(sampling_strategy, total_frames, num_frames)
 
+    # Load and process frames
     frames_list = []
-    for i in indices:
-        np_frame = vr[int(i)].asnumpy()
+    for idx in indices:
+        np_frame = vr[int(idx)].asnumpy()
         frame = torch.from_numpy(np_frame).float() / 255.0
-        frame = frame.permute(2, 0, 1)  # (C, H, W)
+        frame = frame.permute(2, 0, 1)  # HWC -> CHW
         frame = resize_frames(frame.unsqueeze(0), size=resolution).squeeze(0)
         frames_list.append(frame)
 
@@ -141,11 +160,10 @@ def apply_mask(
         torch.Size([100, 3, 224, 224]) torch.Size([100, 224, 224])
     """
     if not (0 <= mask_ratio <= 1):
-        raise ValueError("mask_ratio must be in [0, 1]")
+        raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}")
     if mask_type not in ["bottom_half", "random", "none"]:
-        raise ValueError("Unknown mask type")
-    if frames.dim() != EXPECTED_VIDEO_DIMS:
-        raise RuntimeError("Expected 4D tensor")
+        raise ValueError(f"Invalid mask_type: {mask_type}")
+    _validate_video_input(frames, VIDEO_DIMS_4D)
 
     num_frames, channels, height, width = frames.shape
     mask = torch.zeros(
@@ -161,7 +179,8 @@ def apply_mask(
     # "none" leaves mask as False
 
     masked_frames = frames.clone()
-    masked_frames[mask.unsqueeze(1)] = mask_value
+    # Expand mask to cover all channels
+    masked_frames[mask.unsqueeze(1).expand(-1, channels, -1, -1)] = mask_value
     return masked_frames, mask
 
 
@@ -190,9 +209,9 @@ def add_noise(
         torch.Size([100, 512])
     """
     if noise_std < 0:
-        raise ValueError("noise_std must be non-negative")
+        raise ValueError(f"noise_std must be non-negative, got {noise_std}")
     if noise_type not in ["gaussian", "uniform"]:
-        raise ValueError("Invalid noise_type")
+        raise ValueError(f"Invalid noise_type: {noise_type}")
 
     if noise_type == "gaussian":
         noise = torch.randn_like(frames) * noise_std
@@ -224,13 +243,17 @@ def uniform_sample_indices(
         tensor([5, 15, 25, 35, 45])
     """
     if num_frames <= 0:
-        raise ValueError("num_frames must be positive")
+        raise ValueError(f"num_frames must be positive, got {num_frames}")
     if start_frame < 0:
-        raise ValueError("negative values")
+        raise ValueError(f"start_frame must be non-negative, got {start_frame}")
     if start_frame >= total_frames:
-        raise ValueError("start_frame >= total_frames")
+        raise ValueError(
+            f"start_frame ({start_frame}) must be less than total_frames ({total_frames})"
+        )
     if num_frames > total_frames:
-        raise ValueError("num_frames > total_frames")
+        raise ValueError(
+            f"Cannot sample {num_frames} frames from video with {total_frames} frames"
+        )
 
     return torch.round(torch.linspace(start_frame, total_frames - 1, num_frames)).long()
 
@@ -262,20 +285,19 @@ def resize_frames(
         >>> print(resized.shape)
         torch.Size([100, 3, 224, 224])
     """
-    if frames.dim() != EXPECTED_VIDEO_DIMS:
-        raise RuntimeError("wrong number of dimensions")
+    _validate_video_input(frames, VIDEO_DIMS_4D)
     if isinstance(size, int):
         size = (size, size)
     if any(s <= 0 for s in size):
-        raise ValueError("non-positive values")
-    interp_map = {"bilinear": "bilinear", "nearest": "nearest", "bicubic": "bicubic"}
-    if interpolation not in interp_map:
-        raise ValueError("unsupported interpolation")
+        raise ValueError(f"Size must be positive, got {size}")
+    if interpolation not in ["bilinear", "nearest", "bicubic"]:
+        raise ValueError(f"Unsupported interpolation: {interpolation}")
 
-    align = None if interpolation == "nearest" else align_corners
-    return functional.interpolate(
-        frames, size=size, mode=interpolation, align_corners=align
-    )
+    # Nearest doesn't support align_corners
+    kwargs = {"size": size, "mode": interpolation}
+    if interpolation != "nearest":
+        kwargs["align_corners"] = align_corners
+    return functional.interpolate(frames, **kwargs)
 
 
 def normalize_frames(
@@ -304,9 +326,12 @@ def normalize_frames(
         tensor(-1.) tensor(1.)
     """
     if len(mean) != RGB_CHANNELS or len(std) != RGB_CHANNELS:
-        raise ValueError("don't match number of channels")
+        raise ValueError(
+            f"Mean and std must have 3 values for RGB channels, "
+            f"got mean={len(mean)}, std={len(std)}"
+        )
     if any(s == 0 for s in std):
-        raise RuntimeError("std value is zero")
+        raise RuntimeError(f"Standard deviation cannot be zero, got std={std}")
 
     mean_t = torch.tensor(mean, dtype=frames.dtype, device=frames.device).view(
         1, 3, 1, 1
@@ -341,9 +366,12 @@ def compute_cosine_similarity(
         torch.Size([32])
     """
     if predictions.shape != targets.shape:
-        raise ValueError("different shapes")
+        raise ValueError(
+            f"Predictions and targets must have same shape, "
+            f"got {predictions.shape} vs {targets.shape}"
+        )
     if predictions.numel() == 0:
-        raise RuntimeError("empty")
+        raise RuntimeError("Cannot compute similarity on empty tensors")
 
     norm_p = torch.norm(predictions, p=2, dim=dim, keepdim=True)
     norm_t = torch.norm(targets, p=2, dim=dim, keepdim=True)
@@ -373,11 +401,15 @@ def stack_video_frames(frames_list: list[Tensor]) -> Tensor:
         torch.Size([2, 100, 3, 224, 224])
     """
     if not frames_list:
-        raise RuntimeError("empty")
-    shape = frames_list[0].shape
-    for f in frames_list:
-        if f.shape != shape:
-            raise ValueError("inconsistent shapes")
+        raise RuntimeError("Cannot stack empty list of frames")
+
+    reference_shape = frames_list[0].shape
+    for i, frame in enumerate(frames_list[1:], 1):
+        if frame.shape != reference_shape:
+            raise ValueError(
+                f"All frames must have same shape. Frame 0 has shape {reference_shape}, "
+                f"but frame {i} has shape {frame.shape}"
+            )
     return torch.stack(frames_list, dim=0)
 
 
@@ -390,12 +422,16 @@ def flatten_video_frames(frames: Tensor) -> Tensor:
     Returns:
         Flattened frames of shape (N, C*H*W)
 
+    Raises:
+        RuntimeError: If input doesn't have 4 dimensions
+
     Example:
         >>> frames = torch.randn(100, 3, 224, 224)
         >>> flattened = flatten_video_frames(frames)
         >>> print(flattened.shape)
         torch.Size([100, 150528])  # 3*224*224
     """
+    _validate_video_input(frames, VIDEO_DIMS_4D)
     return frames.view(frames.shape[0], -1)
 
 
@@ -423,6 +459,10 @@ def reshape_to_frames(
         torch.Size([100, 3, 224, 224])
     """
     batch_size, features = flattened.shape
-    if channels * height * width != features:
-        raise ValueError("dimension doesn't match")
+    expected_features = channels * height * width
+    if expected_features != features:
+        raise ValueError(
+            f"Feature dimension {features} doesn't match expected "
+            f"{channels}*{height}*{width}={expected_features}"
+        )
     return flattened.view(batch_size, channels, height, width)
