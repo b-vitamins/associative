@@ -9,21 +9,13 @@ from .graph import (
     get_graph_positional_encoding,
     prepare_graph_batch,
 )
-from .masking import (
-    add_noise_to_embeddings,
-    apply_mask_to_embeddings,
-    generate_block_mask,
-    generate_random_mask,
-)
+from .masking import apply_spatial_mask
 
 __all__ = [
     # Masking utilities
-    "add_noise_to_embeddings",
-    "apply_mask_to_embeddings",
+    "apply_spatial_mask",
     # Graph utilities
     "create_graph_mask_indices",
-    "generate_block_mask",
-    "generate_random_mask",
     "get_graph_positional_encoding",
     "prepare_graph_batch",
 ]

@@ -1,172 +1,161 @@
-"""Masking utilities for temporal and spatial data.
+"""Spatial masking utilities for video reconstruction tasks.
 
-This module provides utilities for creating masks for various reconstruction
-and autoencoding tasks, including temporal masking for video/sequence data,
-random masking for self-supervised learning, and block-based masking for
-testing temporal coherence in neural network models.
+This module provides spatial masking functions for video frames,
+supporting various masking patterns including directional (upper, lower, left, right),
+center, random, and block-based masking.
 """
 
 import torch
 from torch import Tensor
 
-# Expected tensor dimensions
-EMBEDDING_DIM = 3
-MASK_2D_DIM = 2
+# Dimension constants
+_DIM_4D = 4
 
 
-def generate_random_mask(
-    batch_size: int,
-    sequence_length: int,
-    mask_ratio: float,
-    device: torch.device | None = None,
-) -> Tensor:
-    """Generate random temporal mask for sequence data.
-
-    Args:
-        batch_size: Batch size
-        sequence_length: Length of the sequence (e.g., number of frames)
-        mask_ratio: Ratio of positions to mask (0 to 1)
-        device: Device to create tensor on
-
-    Returns:
-        Boolean mask tensor of shape (batch_size, sequence_length)
-        where True indicates masked positions
-
-    Example:
-        >>> mask = generate_random_mask(2, 100, 0.5)
-        >>> print(mask.shape)  # (2, 100)
-        >>> print(mask.float().mean())  # ~0.5
-    """
-    if not 0 <= mask_ratio <= 1:
-        raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}")
-
-    num_masked = int(sequence_length * mask_ratio)
-
-    # Generate random noise for each sequence in batch
-    noise = torch.rand(batch_size, sequence_length, device=device)
-
-    # Sort to get indices of positions to mask
-    ids_shuffle = torch.argsort(noise, dim=1)
-    masked_indices = ids_shuffle[:, :num_masked]
-
-    # Create boolean mask
-    mask = torch.zeros(batch_size, sequence_length, dtype=torch.bool, device=device)
-    mask.scatter_(1, masked_indices, True)
-
-    return mask
+def _create_directional_mask(
+    mask: Tensor, mask_ratio: float, mask_type: str, height: int, width: int
+) -> None:
+    """Create directional masks (lower, upper, left, right)."""
+    if mask_type == "lower":
+        mask_start = int(height * (1 - mask_ratio))
+        mask[:, mask_start:, :, :] = 0
+    elif mask_type == "upper":
+        mask_end = int(height * mask_ratio)
+        mask[:, :mask_end, :, :] = 0
+    elif mask_type == "left":
+        mask_end = int(width * mask_ratio)
+        mask[:, :, :mask_end, :] = 0
+    elif mask_type == "right":
+        mask_start = int(width * (1 - mask_ratio))
+        mask[:, :, mask_start:, :] = 0
 
 
-def generate_block_mask(
-    batch_size: int,
-    sequence_length: int,
-    mask_ratio: float,
-    block_size: int = 1,
-    device: torch.device | None = None,
-) -> Tensor:
-    """Generate block-wise mask for sequence data.
-
-    Masks contiguous blocks of the sequence, useful for testing
-    temporal coherence in reconstruction.
-
-    Args:
-        batch_size: Batch size
-        sequence_length: Length of the sequence
-        mask_ratio: Ratio of positions to mask
-        block_size: Size of contiguous blocks to mask
-        device: Device to create tensor on
-
-    Returns:
-        Boolean mask tensor of shape (batch_size, sequence_length)
-
-    Example:
-        >>> mask = generate_block_mask(2, 100, 0.5, block_size=10)
-        >>> # Will mask ~5 blocks of size 10 each
-    """
-    if not 0 <= mask_ratio <= 1:
-        raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}")
-    if block_size > sequence_length:
-        raise ValueError(f"block_size {block_size} > sequence_length {sequence_length}")
-
-    num_blocks = sequence_length // block_size
-    num_masked_blocks = int(num_blocks * mask_ratio)
-
-    mask = torch.zeros(batch_size, sequence_length, dtype=torch.bool, device=device)
-
-    for b in range(batch_size):
-        # Randomly select blocks to mask
-        block_indices = torch.randperm(num_blocks, device=device)[:num_masked_blocks]
-
-        # Convert block indices to position indices
-        for block_idx in block_indices:
-            start = int(block_idx * block_size)
-            end = min(start + block_size, sequence_length)
-            mask[b, start:end] = True
-
-    return mask
+def _create_center_mask(
+    mask: Tensor, mask_ratio: float, height: int, width: int
+) -> None:
+    """Create center region mask."""
+    h_margin = int(height * (1 - mask_ratio) / 2)
+    w_margin = int(width * (1 - mask_ratio) / 2)
+    mask[:, h_margin : height - h_margin, w_margin : width - w_margin, :] = 0
 
 
-def apply_mask_to_embeddings(
-    embeddings: Tensor,
+def _create_random_mask(  # noqa: PLR0913
     mask: Tensor,
-    mask_value: float = 0.0,
-) -> Tensor:
-    """Apply mask to embedding sequences.
+    mask_ratio: float,
+    num_frames: int,
+    height: int,
+    width: int,
+    channels: int,
+    device: torch.device,
+) -> None:
+    """Create random pixel masking."""
+    total_pixels = height * width
+    num_masked = int(total_pixels * mask_ratio)
+
+    for frame_idx in range(num_frames):
+        indices = torch.randperm(total_pixels, device=device)[:num_masked]
+        h_indices = indices // width
+        w_indices = indices % width
+
+        for c in range(channels):
+            mask[frame_idx, h_indices, w_indices, c] = 0
+
+
+def _create_block_mask(  # noqa: PLR0913
+    mask: Tensor,
+    mask_ratio: float,
+    block_size: int,
+    num_frames: int,
+    height: int,
+    width: int,
+    device: torch.device,
+) -> None:
+    """Create block-based masking."""
+    h_blocks = height // block_size
+    w_blocks = width // block_size
+    total_blocks = h_blocks * w_blocks
+    num_masked_blocks = int(total_blocks * mask_ratio)
+
+    for frame_idx in range(num_frames):
+        block_indices = torch.randperm(total_blocks, device=device)[:num_masked_blocks]
+
+        for idx in block_indices:
+            block_idx_int = int(idx)
+            h_block = block_idx_int // w_blocks
+            w_block = block_idx_int % w_blocks
+
+            h_start = h_block * block_size
+            h_end = min(h_start + block_size, height)
+            w_start = w_block * block_size
+            w_end = min(w_start + block_size, width)
+
+            mask[frame_idx, h_start:h_end, w_start:w_end, :] = 0
+
+
+def apply_spatial_mask(
+    video: Tensor,
+    mask_ratio: float = 0.5,
+    mask_type: str = "lower",
+    block_size: int = 10,
+) -> tuple[Tensor, Tensor]:
+    """Apply spatial masking to video frames.
 
     Args:
-        embeddings: Embeddings of shape (batch_size, seq_len, embed_dim)
-        mask: Boolean mask of shape (batch_size, seq_len)
-        mask_value: Value to use for masked positions
+        video: Video tensor of shape [num_frames, height, width, channels]
+        mask_ratio: Fraction of spatial area to mask (0.0 to 1.0)
+        mask_type: Type of masking pattern. Options:
+            - "lower": Mask lower portion of frames
+            - "upper": Mask upper portion of frames
+            - "left": Mask left portion of frames
+            - "right": Mask right portion of frames
+            - "center": Mask center region of frames
+            - "random": Random pixel masking
+            - "block": Block-based masking with specified block_size
+        block_size: Size of blocks for block masking (only used if mask_type="block")
 
     Returns:
-        Masked embeddings with same shape as input
+        Tuple of (masked_video, mask) where:
+            - masked_video: Video with mask applied (masked regions set to 0)
+            - mask: Binary mask tensor (1 for unmasked, 0 for masked)
 
     Example:
-        >>> embeddings = torch.randn(2, 100, 768)
-        >>> mask = generate_random_mask(2, 100, 0.5)
-        >>> masked = apply_mask_to_embeddings(embeddings, mask)
+        >>> video = torch.rand(512, 224, 224, 3)
+        >>> masked_video, mask = apply_spatial_mask(video, 0.5, "lower")
+        >>> # Lower half of each frame is now masked to 0
     """
-    if embeddings.dim() != EMBEDDING_DIM:
+    if video.dim() != _DIM_4D:
         raise ValueError(
-            f"embeddings must be {EMBEDDING_DIM}D, got {embeddings.dim()}D"
-        )
-    if mask.dim() != MASK_2D_DIM:
-        raise ValueError(f"mask must be {MASK_2D_DIM}D, got {mask.dim()}D")
-    if embeddings.shape[:2] != mask.shape:
-        raise ValueError(
-            f"Shape mismatch: embeddings {embeddings.shape[:2]} vs mask {mask.shape}"
+            f"Video must be 4D [frames, height, width, channels], got {video.dim()}D"
         )
 
-    masked_embeddings = embeddings.clone()
-    mask_expanded = mask.unsqueeze(-1).expand_as(embeddings)
-    masked_embeddings[mask_expanded] = mask_value
+    if not 0.0 <= mask_ratio <= 1.0:
+        raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}")
 
-    return masked_embeddings
+    num_frames, height, width, channels = video.shape
+    device = video.device
 
+    # Create mask based on type
+    mask = torch.ones_like(video)
 
-def add_noise_to_embeddings(
-    embeddings: Tensor,
-    noise_std: float = 0.1,
-    mask: Tensor | None = None,
-) -> Tensor:
-    """Add Gaussian noise to embeddings.
+    if mask_type in ["lower", "upper", "left", "right"]:
+        _create_directional_mask(mask, mask_ratio, mask_type, height, width)
+    elif mask_type == "center":
+        _create_center_mask(mask, mask_ratio, height, width)
+    elif mask_type == "random":
+        _create_random_mask(
+            mask, mask_ratio, num_frames, height, width, channels, device
+        )
+    elif mask_type == "block":
+        _create_block_mask(
+            mask, mask_ratio, block_size, num_frames, height, width, device
+        )
+    else:
+        raise ValueError(
+            f"Unknown mask_type: {mask_type}. Must be one of: "
+            "lower, upper, left, right, center, random, block"
+        )
 
-    Args:
-        embeddings: Embeddings of shape (batch_size, seq_len, embed_dim)
-        noise_std: Standard deviation of Gaussian noise
-        mask: Optional mask to apply noise only to certain positions
+    # Apply mask to video
+    masked_video = video * mask
 
-    Returns:
-        Noisy embeddings with same shape as input
-
-    Example:
-        >>> embeddings = torch.randn(2, 100, 768)
-        >>> noisy = add_noise_to_embeddings(embeddings, noise_std=0.05)
-    """
-    noise = torch.randn_like(embeddings) * noise_std
-
-    if mask is not None:
-        if mask.dim() == MASK_2D_DIM:
-            mask = mask.unsqueeze(-1)
-        noise = noise * mask.float()
-
-    return embeddings + noise
+    return masked_video, mask
