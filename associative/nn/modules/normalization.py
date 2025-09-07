@@ -1,13 +1,30 @@
-"""Normalization layers for associative memory models."""
+"""Normalization layers for associative memory models.
+
+This module provides specialized normalization layers optimized for energy-based
+associative memory models, including energy-specific variants of layer normalization.
+
+Classes:
+    EnergyLayerNorm: Layer normalization with single gamma parameter for energy models
+"""
 
 import torch
 from torch import Tensor, nn
 
 
 class EnergyLayerNorm(nn.Module):
-    """Energy-based layer normalization.
+    """Energy-based layer normalization with simplified parameterization.
 
-    Similar to LayerNorm but with single gamma parameter.
+    Similar to standard LayerNorm but uses a single scalar gamma parameter instead
+    of per-element weights. This reduces parameters while maintaining normalization
+    benefits for energy-based models.
+
+    The normalization is computed as:
+    output = gamma * (input - mean) / sqrt(var + eps) + bias
+
+    Attributes:
+        normalized_shape: Shape of the normalization (single int for feature dimension)
+        eps: Small epsilon for numerical stability  
+        elementwise_affine: Whether to apply learnable affine transformation
     """
 
     def __init__(
@@ -19,6 +36,16 @@ class EnergyLayerNorm(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize energy layer normalization.
+
+        Args:
+            normalized_shape: Feature dimension to normalize over
+            eps: Small epsilon for numerical stability. Defaults to 1e-5.
+            elementwise_affine: Whether to learn affine parameters. Defaults to True.
+            bias: Whether to use bias parameter. Defaults to True.
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.normalized_shape = (normalized_shape,)
@@ -38,6 +65,14 @@ class EnergyLayerNorm(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply energy layer normalization.
+
+        Args:
+            x: Input tensor of shape (..., normalized_shape)
+
+        Returns:
+            Normalized tensor of same shape as input
+        """
         # Compute mean and variance using more efficient single-pass algorithm
         mean = x.mean(dim=-1, keepdim=True)
         # Use E[X²] - E[X]² formula which requires only one pass through the data

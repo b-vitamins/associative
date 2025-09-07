@@ -298,10 +298,22 @@ class MovieChat1K(Dataset):
                 repeats = self.num_frames // len(indices) + 1
                 indices = indices.repeat(repeats)[: self.num_frames]
 
-        # Extract frames
+        # Extract frames with EOF handling
         frames = []
         for idx in indices:
-            frame = vr[idx.item()].asnumpy()  # [H, W, C]
+            try:
+                # Clamp index to valid range to avoid EOF issues
+                safe_idx = min(idx.item(), total_frames - 1)
+                frame = vr[safe_idx].asnumpy()  # [H, W, C]
+            except Exception as e:
+                # If frame extraction fails, use the last successfully loaded frame
+                # or create a black frame as fallback
+                if frames:
+                    frame = frames[-1] if isinstance(frames[-1], np.ndarray) else frames[-1].numpy()
+                else:
+                    # Create black frame with expected dimensions
+                    frame = np.zeros((224, 224, 3), dtype=np.uint8)
+                print(f"Warning: Failed to load frame {idx.item()}, using fallback")
 
             # Apply transform if provided
             if self.transform is not None:

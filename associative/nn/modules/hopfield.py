@@ -1,4 +1,13 @@
-"""Hopfield network layers for associative memory models."""
+"""Hopfield network layers for associative memory models.
+
+This module implements modern Hopfield networks with various activation functions
+and cross-modal memory capabilities. These networks store and retrieve patterns
+through energy-based dynamics and support multimodal associative memory.
+
+Classes:
+    Hopfield: Standard Hopfield memory layer with configurable activations
+    CrossModalHopfield: Multi-modality Hopfield with cross-modal interactions
+"""
 
 import math
 
@@ -11,12 +20,17 @@ from .utils import Lambda
 
 
 class Hopfield(nn.Module):
-    """Hopfield network layer with energy function.
+    """Hopfield network layer with configurable energy activation functions.
 
-    Args:
-        in_features: Input dimension
-        hidden_features: Hidden dimension (computed from ratio if None)
-        config: Hopfield configuration
+    Implements modern Hopfield networks that compute energy functions with various
+    activation types including ReLU, GELU, tanh, softmax, and Manhattan distance
+    variants. The energy is computed as -0.5 * activation(Wx)^2.sum() for most
+    variants, with special handling for Manhattan distance.
+
+    Attributes:
+        in_features: Input feature dimension
+        hidden_features: Hidden layer dimension
+        config: Configuration object specifying activation type and other parameters
     """
 
     def __init__(
@@ -27,6 +41,15 @@ class Hopfield(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize Hopfield network layer.
+
+        Args:
+            in_features: Input feature dimension
+            hidden_features: Hidden layer dimension. If None, computed from config.hidden_dim_ratio
+            config: Hopfield configuration object. Defaults to HopfieldConfig() if None
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -82,7 +105,14 @@ class Hopfield(nn.Module):
             )
 
     def forward(self, x: Tensor) -> Tensor:
-        """Compute Hopfield energy."""
+        """Compute Hopfield energy function.
+
+        Args:
+            x: Input tensor of shape (batch, seq_len, in_features) or (batch, in_features)
+
+        Returns:
+            Scalar energy value for the input patterns
+        """
         if self.config.activation_type == "manhattan":
             # Manhattan distance energy - optimized computation
             # x: [batch, seq, in_features]
@@ -125,17 +155,18 @@ class CrossModalHopfield(nn.Module):
     """Cross-modal Hopfield memory with saliency-weighted pattern retrieval.
 
     Implements modality-specific Hopfield memories influenced by complementary
-    modalities through cross-modal saliency weights.
+    modalities through cross-modal saliency weights. The energy function combines
+    intra-modal and cross-modal similarities with learnable prototypes.
 
     Energy function: E^HN = -Sum_m Sum_A Sum_mu G(alpha^{m,mu}_A * xi^{m,mu}^T g^m_A)
     where alpha blends intra-modal and cross-modal similarities.
 
-    Args:
-        modality_dims: Dict mapping modality names to dimensions
-        num_prototypes: Number of prototypes K per modality (int or dict)
-        cross_weight: λ_cross weight for cross-modal influence [0,1]
-        temporal_window: Window size w for temporal smoothing (odd number)
-        activation_type: Activation function "softplus" or "relu"
+    Attributes:
+        modality_dims: Dictionary mapping modality names to their feature dimensions
+        num_prototypes: Dictionary of prototype counts per modality
+        cross_weight: Lambda_cross weight for cross-modal influence [0,1]
+        temporal_window: Window size for temporal smoothing (must be odd)
+        activation_type: Activation function type ("softplus" or "relu")
     """
 
     def __init__(
@@ -148,6 +179,17 @@ class CrossModalHopfield(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize cross-modal Hopfield memory.
+
+        Args:
+            modality_dims: Dictionary mapping modality names to feature dimensions
+            num_prototypes: Number of prototypes K per modality (int for all, or dict per modality)
+            cross_weight: Lambda_cross weight for cross-modal influence, in range [0,1]
+            temporal_window: Window size for temporal smoothing (must be positive odd number)
+            activation_type: Activation function type ("softplus" or "relu")
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 

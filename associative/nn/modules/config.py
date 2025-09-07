@@ -1,4 +1,19 @@
-"""Configuration classes for associative memory models."""
+"""Configuration classes for associative memory models.
+
+This module provides dataclass configurations for various components of associative
+memory models, including transformers, attention mechanisms, Hopfield networks, and
+specialized modules for multimodal and continuous memory systems.
+
+Classes:
+    EnergyBlockConfig: Configuration for energy transformer blocks
+    EnergyAttentionConfig: Configuration for energy-based attention layers  
+    HopfieldConfig: Configuration for Hopfield memory layers
+    EnergyTransformerConfig: Main configuration for energy transformers
+    BasisConfig: Configuration for basis functions in continuous memory
+    CCCPConfig: Configuration for CCCP optimization algorithm
+    ContinuousHopfieldConfig: Configuration for continuous Hopfield networks
+    METConfig: Configuration for Multimodal Energy Transformers
+"""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -11,14 +26,17 @@ from torch.nn import functional
 class EnergyBlockConfig:
     """Configuration for energy transformer blocks.
 
-    Args:
+    Defines parameters for individual transformer blocks in energy-based models,
+    including attention and MLP layer configurations.
+
+    Attributes:
         embed_dim: Embedding dimension
         num_heads: Number of attention heads
-        qk_dim: Query/Key dimension per head
+        qk_dim: Query/Key dimension per head  
         mlp_ratio: MLP hidden dimension ratio
-        attn_bias: Whether to use bias in attention
-        mlp_bias: Whether to use bias in MLP
-        attn_beta: Attention temperature scaling
+        attn_bias: Whether to use bias in attention projections
+        mlp_bias: Whether to use bias in MLP layers
+        attn_beta: Attention temperature scaling factor
     """
 
     embed_dim: int
@@ -34,12 +52,15 @@ class EnergyBlockConfig:
 class EnergyAttentionConfig:
     """Configuration for energy-based attention layers.
 
-    Args:
-        embed_dim: Embedding dimension
+    Specifies parameters for attention mechanisms that compute energy functions
+    instead of traditional softmax attention weights.
+
+    Attributes:
+        embed_dim: Input embedding dimension
         num_heads: Number of attention heads
         qk_dim: Query/Key dimension per head
-        beta: Temperature scaling factor (default: 1/sqrt(qk_dim))
-        bias: Whether to use bias in projections
+        beta: Temperature scaling factor (defaults to 1/sqrt(qk_dim) if None)
+        bias: Whether to use bias terms in query/key projections
     """
 
     embed_dim: int
@@ -49,6 +70,7 @@ class EnergyAttentionConfig:
     bias: bool = False
 
     def __post_init__(self) -> None:
+        """Validate configuration parameters after initialization."""
         if self.embed_dim <= 0:
             raise ValueError(f"embed_dim must be positive, got {self.embed_dim}")
         if self.num_heads <= 0:
@@ -59,13 +81,16 @@ class EnergyAttentionConfig:
 
 @dataclass(frozen=True)
 class HopfieldConfig:
-    """Configuration for Hopfield layers.
+    """Configuration for Hopfield memory layers.
 
-    Args:
+    Defines parameters for modern Hopfield networks that store and retrieve
+    patterns through energy-based dynamics.
+
+    Attributes:
         hidden_dim_ratio: Ratio of hidden dimension to input dimension
         activation_type: Type of activation function ("relu", "gelu", "tanh", "softmax", "manhattan")
         activation: Custom energy activation function (used if activation_type is None)
-        bias: Whether to use bias in linear projection
+        bias: Whether to use bias in linear projection layers
     """
 
     hidden_dim_ratio: float = 4.0
@@ -76,6 +101,7 @@ class HopfieldConfig:
     bias: bool = False
 
     def __post_init__(self) -> None:
+        """Validate Hopfield configuration parameters."""
         if self.hidden_dim_ratio <= 0:
             raise ValueError(
                 f"hidden_dim_ratio must be positive, got {self.hidden_dim_ratio}"

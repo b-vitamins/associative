@@ -2,7 +2,19 @@
 
 This module provides reusable numerical integration methods for computing
 integrals over continuous functions, particularly for partition functions
-and expectations in energy-based models.
+and expectations in energy-based models. All integrators support batched
+operations and are optimized for PyTorch tensors with GPU acceleration.
+
+Classes:
+    Integrator: Abstract base class for all integration methods
+    TrapezoidalIntegrator: Trapezoidal rule integration (O(1/n²) accuracy)
+    SimpsonIntegrator: Simpson's rule integration (O(1/n⁴) accuracy)
+    GaussLegendreIntegrator: Gauss-Legendre quadrature (exponential accuracy for smooth functions)
+    MonteCarloIntegrator: Monte Carlo integration with importance sampling
+    AdaptiveIntegrator: Adaptive refinement with automatic error control
+
+Functions:
+    create_integrator: Factory function to create integrators by name
 """
 
 from abc import ABC, abstractmethod

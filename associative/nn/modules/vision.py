@@ -1,4 +1,12 @@
-"""Vision-specific modules for associative memory models."""
+"""Vision-specific modules for associative memory models.
+
+This module provides specialized components for computer vision tasks using
+associative memory transformers, including patch embedding utilities for
+converting images into token sequences.
+
+Classes:
+    PatchEmbed: Image to patch embedding layer for vision transformers
+"""
 
 from collections.abc import Callable
 
@@ -10,9 +18,19 @@ from .utils import Lambda
 
 
 class PatchEmbed(nn.Module):
-    """2D Image to Patch Embedding.
+    """2D Image to Patch Embedding for vision transformers.
 
-    Converts images into sequences of patches with learnable projection.
+    Converts input images into sequences of flattened patches and projects them
+    to embedding space. This is the standard approach for tokenizing images in
+    vision transformer architectures.
+
+    Attributes:
+        img_size: Input image dimensions (height, width)
+        patch_size: Patch dimensions (height, width) 
+        num_patches: Total number of patches per image
+        to_patches: Function to extract and flatten patches
+        proj: Linear projection layer
+        norm: Optional normalization layer
     """
 
     def __init__(
@@ -26,6 +44,18 @@ class PatchEmbed(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize patch embedding layer.
+
+        Args:
+            img_size: Input image size (assumed square). Defaults to 32.
+            patch_size: Size of each patch (assumed square). Defaults to 4.
+            in_chans: Number of input channels. Defaults to 3.
+            embed_dim: Embedding dimension for patches. Defaults to 256.
+            norm_layer: Optional normalization layer constructor. Defaults to None.
+            bias: Whether to use bias in linear projection. Defaults to True.
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.img_size = (img_size, img_size)
@@ -50,13 +80,27 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
-        """Convert image to sequence of embedded patches."""
+        """Convert image to sequence of embedded patches.
+
+        Args:
+            x: Input image tensor of shape (batch, in_chans, height, width)
+
+        Returns:
+            Embedded patches of shape (batch, num_patches, embed_dim)
+        """
         x = self.to_patches(x)
         x = self.proj(x)
         return self.norm(x)
 
     def from_patches(self, x: Tensor) -> Tensor:
-        """Convert patches back to image format."""
+        """Convert patches back to image format.
+
+        Args:
+            x: Patch sequence of shape (batch, num_patches, patch_features)
+
+        Returns:
+            Reconstructed image of shape (batch, channels, height, width)
+        """
         h = w = int(self.num_patches**0.5)
         c = x.shape[-1] // (self.patch_size[0] * self.patch_size[1])
 

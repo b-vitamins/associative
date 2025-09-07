@@ -1,4 +1,23 @@
-"""Associative memory model modules."""
+"""Neural network modules for associative memory models.
+
+This module provides PyTorch implementations of energy-based associative memory
+architectures, including modern Hopfield networks, energy transformers, and
+continuous memory systems. Key components include:
+
+- Attention mechanisms with energy-based dynamics
+- Basis functions for continuous memory representations  
+- Configuration classes for model parameterization
+- Continuous memory modules with function approximation
+- Hopfield networks with modern architectures
+- Numerical integrators for continuous dynamics
+- Energy-based normalization layers
+- Optimization utilities for energy minimization
+- Transformer architectures with associative memory
+- Vision-specific components like patch embedding
+
+All modules support GPU acceleration and are designed for scalability
+in computer vision, graph learning, and multimodal tasks.
+"""
 
 from .attention import EnergyAttention, GraphEnergyAttention, MultimodalEnergyAttention
 from .basis import (

@@ -4,6 +4,11 @@ This module implements continuous-time Hopfield networks that compress
 discrete memories into continuous representations using basis functions,
 as described in "Modern Hopfield Networks with Continuous-Time Memories"
 (Santos et al., 2025).
+
+Classes:
+    ContinuousMemory: Memory representation using basis function compression
+    ContinuousHopfield: Full Hopfield network with CCCP optimization
+    ContinuousAttention: Continuous attention mechanism for transformers
 """
 
 from typing import Any

@@ -3,6 +3,17 @@
 This module implements the CCCP algorithm for minimizing energy functions
 that can be decomposed into concave and convex parts, as described in
 Yuille & Rangarajan (2003) and applied in Santos et al. (2025).
+
+The CCCP algorithm iteratively minimizes E(x) = E_concave(x) + E_convex(x)
+by linearizing the concave part at each step, resulting in guaranteed convergence
+to local minima for continuous Hopfield networks and other energy-based models.
+
+Classes:
+    OptimizationResult: Dataclass containing optimization results and trajectory
+    EnergyFunction: Abstract base class for CCCP-compatible energy functions
+    CCCPOptimizer: Main optimizer implementing the CCCP algorithm
+    ContinuousHopfieldEnergy: Specific energy function for continuous Hopfield networks
+    QuadraticConvexSolver: Solver for quadratic programming subproblems
 """
 
 from abc import ABC, abstractmethod

@@ -1,4 +1,15 @@
-"""Energy-based attention mechanisms."""
+"""Energy-based attention mechanisms for associative memory models.
+
+This module implements attention mechanisms that compute energy functions rather than
+traditional softmax-based attention. The energy-based approach enables associative
+memory dynamics through gradient-based optimization and supports various modalities
+including vision, graphs, and multimodal scenarios.
+
+Classes:
+    EnergyAttention: Basic energy-based multi-head attention
+    GraphEnergyAttention: Graph-aware attention with adjacency masking
+    MultimodalEnergyAttention: Continuous compression attention for multiple modalities
+"""
 
 import math
 from collections.abc import Callable
@@ -16,10 +27,18 @@ from .integrator import GaussLegendreIntegrator
 
 
 class EnergyAttention(nn.Module):
-    """Energy-based multi-head attention.
+    """Energy-based multi-head attention mechanism.
 
-    Computes attention as an energy function rather than
-    traditional softmax attention.
+    Computes attention weights as an energy function using logsumexp rather than
+    traditional softmax attention. The energy is computed as the negative logsumexp
+    of scaled attention scores, enabling gradient-based optimization for associative
+    memory dynamics.
+
+    Attributes:
+        embed_dim: Input embedding dimension
+        num_heads: Number of attention heads
+        qk_dim: Dimension of query/key projections
+        scale: Temperature scaling factor (beta)
     """
 
     def __init__(
@@ -28,6 +47,13 @@ class EnergyAttention(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize energy attention layer.
+
+        Args:
+            config: Configuration object specifying layer parameters
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -58,6 +84,7 @@ class EnergyAttention(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        """Initialize layer weights using normal distribution."""
         nn.init.normal_(self.query_proj, mean=0.0, std=0.002)
         nn.init.normal_(self.key_proj, mean=0.0, std=0.002)
         if self.query_bias is not None:
@@ -67,13 +94,17 @@ class EnergyAttention(nn.Module):
     def forward(
         self, hidden_states: Tensor, attention_mask: Tensor | None = None
     ) -> Tensor:
-        """
+        """Compute energy-based attention.
+
+        Computes queries and keys from hidden states, then calculates attention scores
+        and returns the negative logsumexp as the energy value for gradient descent.
+
         Args:
-            hidden_states: [batch, seq_len, embed_dim]
-            attention_mask: Optional [batch, num_heads, seq_len, seq_len]
+            hidden_states: Input features of shape [batch, seq_len, embed_dim]
+            attention_mask: Optional attention mask of shape [batch, num_heads, seq_len, seq_len]
 
         Returns:
-            energy: Scalar energy value
+            Scalar energy value for optimization
         """
         # Compute queries and keys
         queries = torch.einsum("bnd,hqd->bnhq", hidden_states, self.query_proj)
@@ -100,10 +131,18 @@ class EnergyAttention(nn.Module):
 
 
 class GraphEnergyAttention(nn.Module):
-    """Graph-aware energy-based multi-head attention.
+    """Graph-aware energy-based multi-head attention mechanism.
 
-    Implements the exact attention mechanism from JAX graph ET,
-    including head mixing weights and proper adjacency masking.
+    Implements energy-based attention for graph data with adjacency matrix masking
+    and head mixing weights. This mechanism combines multi-head attention with
+    graph structure information through adjacency matrices and cross-head mixing.
+
+    Attributes:
+        embed_dim: Input embedding dimension
+        num_heads: Number of attention heads  
+        qk_dim: Dimension of query/key projections
+        head_mix: Parameter matrix for mixing attention heads
+        temperature: Per-head temperature scaling factors
     """
 
     temperature: Tensor
@@ -114,6 +153,13 @@ class GraphEnergyAttention(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize graph energy attention layer.
+
+        Args:
+            config: Configuration object specifying layer parameters
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -160,6 +206,7 @@ class GraphEnergyAttention(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        """Initialize layer weights using normal distribution."""
         nn.init.normal_(self.key_proj, mean=0.0, std=0.002)
         nn.init.normal_(self.query_proj, mean=0.0, std=0.002)
         nn.init.normal_(self.head_mix, mean=0.0, std=0.002)
@@ -174,16 +221,19 @@ class GraphEnergyAttention(nn.Module):
         adjacency: Tensor | None = None,
         attention_mask: Tensor | None = None,
     ) -> Tensor:
-        """
-        Forward pass matching JAX implementation exactly.
+        """Compute graph-aware energy-based attention.
+
+        Handles both batched and unbatched inputs with optional adjacency matrix
+        masking. Applies head mixing and computes energy via logsumexp with
+        proper handling of masked edges.
 
         Args:
-            hidden_states: [batch, seq_len, embed_dim] or [seq_len, embed_dim]
-            adjacency: Optional [seq_len, seq_len, num_heads] adjacency matrix
-            attention_mask: Not used (for compatibility)
+            hidden_states: Input features of shape [batch, seq_len, embed_dim] or [seq_len, embed_dim]
+            adjacency: Optional adjacency matrix of shape [seq_len, seq_len, num_heads]
+            attention_mask: Unused, kept for compatibility
 
         Returns:
-            energy: Scalar energy value
+            Scalar energy value for optimization
         """
         # Handle both batched and unbatched inputs
         if hidden_states.dim() == 2:  # noqa: PLR2004
@@ -207,7 +257,15 @@ class GraphEnergyAttention(nn.Module):
     def _forward_batched(
         self, hidden_states: Tensor, adj: Tensor | None = None
     ) -> Tensor:
-        """Efficient batched forward pass."""
+        """Efficient batched forward pass for multiple samples.
+
+        Args:
+            hidden_states: Batched input of shape [batch, seq_len, embed_dim]
+            adj: Optional adjacency matrix shared across batch
+
+        Returns:
+            Scalar energy value summed over batch
+        """
         hidden_states.shape[0]
 
         # Compute keys and queries for entire batch
@@ -253,7 +311,15 @@ class GraphEnergyAttention(nn.Module):
         return energies.sum()
 
     def _forward_single(self, g: Tensor, adj: Tensor | None = None) -> Tensor:
-        """Forward for single example matching JAX exactly."""
+        """Forward pass for single unbatched example.
+
+        Args:
+            g: Input features of shape [seq_len, embed_dim]
+            adj: Optional adjacency matrix of shape [seq_len, seq_len, num_heads]
+
+        Returns:
+            Scalar energy value for single example
+        """
         # Compute keys and queries
         keys = torch.einsum("kd,hzd->khz", g, self.key_proj)  # [seq, heads, head_dim]
         queries = torch.einsum(
@@ -302,8 +368,17 @@ class GraphEnergyAttention(nn.Module):
 class MultimodalEnergyAttention(nn.Module):
     """Multimodal energy attention with continuous compression.
 
-    Implements continuous compressive attention
-    with cross-modal projections for heterogeneous dimensions.
+    Implements continuous memory compression for multimodal attention across
+    heterogeneous input dimensions. Uses basis functions to compress memory
+    representations and supports cross-modal attention between different
+    modality types through learned projections.
+
+    Attributes:
+        modality_configs: Configuration for each modality
+        modalities: List of modality names
+        cross_modal_pairs: Pairs of modalities for cross-attention
+        integrator: Numerical integrator for partition function computation
+        beta: Temperature scaling factor for numerical stability
     """
 
     def __init__(
@@ -314,6 +389,15 @@ class MultimodalEnergyAttention(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
+        """Initialize multimodal energy attention layer.
+
+        Args:
+            modality_configs: Dictionary mapping modality names to config dictionaries
+            cross_modal_pairs: List of modality pairs for cross-attention. Defaults to all pairs.
+            num_integration_points: Number of quadrature points for numerical integration. Defaults to 50.
+            device: Device to place parameters on. Defaults to None.
+            dtype: Data type for parameters. Defaults to None.
+        """
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
@@ -380,11 +464,26 @@ class MultimodalEnergyAttention(nn.Module):
         self.beta = 1.0 / math.sqrt(next(iter(modality_configs.values()))["qk_dim"])
 
     def _get_beta(self) -> float:
-        """Get beta scaling factor: β = 1/√Y for numerical stability."""
+        """Get beta scaling factor for numerical stability.
+        
+        Returns:
+            Beta value: β = 1/√Y where Y is the query/key dimension
+        """
         return self.beta
 
     def _compute_intra_energy(self, x: Tensor, modality: str) -> Tensor:
-        """Compute intra-modal energy: -1/β Σ log ∫exp(βs(t))dt + ||x||²/2."""
+        """Compute intra-modal energy with regularization.
+
+        Computes E^intra = -1/β Σ log ∫exp(βs(t))dt + ||x||²/2 where s(t) are 
+        attention scores with continuous compression.
+
+        Args:
+            x: Input features for modality
+            modality: Name of the modality
+
+        Returns:
+            Scalar energy value including regularization term
+        """
         # Project to queries and keys
         queries = torch.einsum("bld,hqd->blhq", x, self.query_proj[modality])
         keys = torch.einsum("bld,hqd->blhq", x, self.key_proj[modality])
@@ -406,7 +505,20 @@ class MultimodalEnergyAttention(nn.Module):
     def _compute_cross_energy(
         self, x_source: Tensor, x_target: Tensor, source: str, target: str
     ) -> Tensor:
-        """Compute cross-modal energy: -1/β Σ log ∫exp(βs(t))dt."""
+        """Compute cross-modal energy between two modalities.
+
+        Computes E^cross = -1/β Σ log ∫exp(βs(t))dt where s(t) are attention
+        scores between projected source features and compressed target keys.
+
+        Args:
+            x_source: Source modality features
+            x_target: Target modality features  
+            source: Name of source modality
+            target: Name of target modality
+
+        Returns:
+            Scalar cross-modal energy value
+        """
         # Project source features to target space
         proj_key = f"{source}_to_{target}"
         x_proj = torch.einsum("bld,Dd->blD", x_source, self.cross_proj[proj_key])

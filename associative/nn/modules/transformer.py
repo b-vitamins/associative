@@ -1,4 +1,18 @@
-"""Associative memory transformer models."""
+"""Associative memory transformer models.
+
+This module implements transformer architectures that use energy-based attention
+mechanisms and Hopfield networks for associative memory retrieval. The models
+support both vision and graph learning tasks with gradient-based optimization
+dynamics for memory consolidation.
+
+Classes:
+    EnergyTransformerBlock: Individual transformer block with energy attention and Hopfield layers
+    EnergyTransformer: Complete transformer for vision tasks with patch embeddings
+    GraphEnergyBlock: Graph-aware transformer block with adjacency matrix support
+    GraphEnergyTransformer: Complete graph transformer with positional encodings
+    METBlock: Multimodal Energy Transformer block for cross-modal interactions
+    MultimodalEnergyTransformer: Complete multimodal transformer architecture
+"""
 
 import logging
 import math
@@ -24,21 +38,31 @@ logger = logging.getLogger(__name__)
 
 
 class EnergyTransformerBlock(nn.Module):
-    """Associative memory transformer block.
+    """Associative memory transformer block with energy-based components.
 
-    Combines energy-based attention and Hopfield network for associative memory.
+    Combines energy-based attention and Hopfield network layers for associative
+    memory retrieval. The block computes energy functions that can be optimized
+    via gradient descent for memory consolidation and pattern completion.
+
+    The forward pass returns a scalar energy value that serves as the loss for
+    training the associative memory dynamics.
+
+    Attributes:
+        attention: Energy-based attention mechanism
+        hopfield: Hopfield memory layer for pattern storage
+        norm: Energy-specific layer normalization
+
+    Example:
+        >>> config = EnergyTransformerConfig(embed_dim=256, num_heads=8)
+        >>> block = EnergyTransformerBlock(256, config.attention_config, config.hopfield_config)
+        >>> energy = block(features)  # Returns scalar energy for optimization
 
     Mixed Precision Training:
-        block = EnergyTransformerBlock(dim, attn_config, hopfield_config, enable_amp=True)
-        scaler = torch.cuda.amp.GradScaler()
-
-        with torch.cuda.amp.autocast():
-            energy = block(features)
-            loss = energy.mean()
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        >>> scaler = torch.cuda.amp.GradScaler()
+        >>> with torch.cuda.amp.autocast():
+        ...     energy = block(features)
+        ...     loss = energy.mean()
+        >>> scaler.scale(loss).backward()
     """
 
     def __init__(
