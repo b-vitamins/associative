@@ -464,7 +464,7 @@ def create_basis(basis_type: str, num_basis: int, **kwargs) -> BasisFunction:
 class ContinuousCompression(nn.Module):
     """Continuous compression via ridge regression on basis functions.
 
-    Implements the compression mechanism from MET paper Section 3.2:
+    Implements the compression mechanism:
     - Projects discrete sequences onto continuous basis functions
     - Uses ridge regression to find optimal coefficients
     - Enables reconstruction at arbitrary time points
