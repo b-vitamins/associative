@@ -177,7 +177,7 @@ class ApplyAudioMask(AudioTransform):
 
     def _generate_mask(
         self, shape: tuple[int, ...], device: torch.device | None = None
-    ) -> Tensor:  # noqa: PLR0911
+    ) -> Tensor:
         """Generate mask pattern based on strategy."""
         # Handle edge cases
         if self.mask_ratio == 0.0:
@@ -186,14 +186,16 @@ class ApplyAudioMask(AudioTransform):
             return torch.ones(shape, device=device)
 
         # Dispatch to specific mask generators
-        if self.mask_type == "random":
-            return self._generate_random_mask(shape, device)
-        if self.mask_type == "block":
-            return self._generate_block_mask(shape, device)
-        if self.mask_type == "time":
-            return self._generate_time_mask(shape, device)
-        if self.mask_type == "frequency":
-            return self._generate_frequency_mask(shape, device)
+        mask_generators = {
+            "random": self._generate_random_mask,
+            "block": self._generate_block_mask,
+            "time": self._generate_time_mask,
+            "frequency": self._generate_frequency_mask,
+        }
+
+        generator = mask_generators.get(self.mask_type)
+        if generator:
+            return generator(shape, device)
 
         return torch.zeros(shape, device=device)
 
@@ -247,70 +249,135 @@ class ApplyAudioMask(AudioTransform):
 
     def _generate_block_mask_1d(
         self, length: int, device: torch.device | None = None
-    ) -> Tensor:  # noqa: C901, PLR0912
+    ) -> Tensor:
         """Generate 1D block mask with non-overlapping blocks."""
         mask = torch.zeros(length, device=device)
         target_masked = int(length * self.mask_ratio)
 
         # Randomly choose number of masks
-        n_masks = torch.randint(
-            self.min_masks, self.max_masks + 1, (1,), device=device
-        ).item()
+        n_masks = int(
+            torch.randint(
+                self.min_masks, self.max_masks + 1, (1,), device=device
+            ).item()
+        )
 
         # Calculate average mask length
         avg_mask_length = target_masked / n_masks
 
         # Keep track of placed masks to avoid overlap
+        mask_segments = self._place_mask_segments(
+            length, n_masks, avg_mask_length, device
+        )
+
+        # Fallback: ensure at least one segment if none were placed
+        if not mask_segments and target_masked > 0:
+            # Place a single segment at a random position
+            mask_len = min(target_masked, length)
+            start = int(
+                torch.randint(
+                    0, max(1, length - mask_len + 1), (1,), device=device
+                ).item()
+            )
+            end = start + mask_len
+            mask_segments = [(start, end)]
+
+        # Apply mask segments
+        for start, end in mask_segments:
+            mask[start:end] = 1
+
+        # Adjust if needed
+        return self._adjust_mask_coverage(mask, mask_segments, target_masked, length)
+
+    def _place_mask_segments(
+        self,
+        length: int,
+        n_masks: int,
+        avg_mask_length: float,
+        device: torch.device | None,
+    ) -> list[tuple[int, int]]:
+        """Place non-overlapping mask segments."""
         mask_segments = []
 
         for _ in range(int(n_masks)):
             if len(mask_segments) >= n_masks:
                 break
 
-            # Calculate mask length with some variation
-            min_len = max(self.min_mask_length, int(avg_mask_length * 0.5))
-            max_len = min(
-                self.max_mask_length, int(avg_mask_length * 1.5), length // n_masks
+            segment = self._try_place_single_segment(
+                length, n_masks, avg_mask_length, mask_segments, device
             )
+            if segment:
+                mask_segments.append(segment)
 
-            if min_len > max_len:
-                continue
+        return mask_segments
 
-            mask_len = int(
-                torch.randint(
-                    int(min_len), int(max_len) + 1, (1,), device=device
-                ).item()
-            )
+    def _try_place_single_segment(
+        self,
+        length: int,
+        n_masks: int,
+        avg_mask_length: float,
+        existing_segments: list[tuple[int, int]],
+        device: torch.device | None,
+    ) -> tuple[int, int] | None:
+        """Try to place a single mask segment without overlap."""
+        # Calculate mask length with some variation
+        min_len = max(self.min_mask_length, int(avg_mask_length * 0.5))
+        max_len = min(
+            self.max_mask_length, int(avg_mask_length * 1.5), length // n_masks
+        )
 
-            # Try to find non-overlapping position
-            attempts = 0
-            max_attempts = 50
-            placed = False
+        if min_len > max_len:
+            return None
 
-            while attempts < max_attempts and not placed:
-                attempts += 1
+        mask_len = int(
+            torch.randint(int(min_len), int(max_len) + 1, (1,), device=device).item()
+        )
 
-                # Random start position
-                max_start = int(length - mask_len)
-                if max_start <= 0:
-                    break
+        # Try to find non-overlapping position
+        return self._find_non_overlapping_position(
+            length, mask_len, existing_segments, device
+        )
 
-                start = int(torch.randint(0, max_start + 1, (1,), device=device).item())
-                end = start + mask_len
+    def _find_non_overlapping_position(
+        self,
+        length: int,
+        mask_len: int,
+        existing_segments: list[tuple[int, int]],
+        device: torch.device | None,
+        max_attempts: int = 50,
+    ) -> tuple[int, int] | None:
+        """Find a non-overlapping position for a mask segment."""
+        for _ in range(max_attempts):
+            # Random start position
+            max_start = int(length - mask_len)
+            if max_start <= 0:
+                return None
 
-                # Check for overlap with existing segments
-                overlap = False
-                for seg_start, seg_end in mask_segments:
-                    if not (end <= seg_start or start >= seg_end):
-                        overlap = True
-                        break
+            start = int(torch.randint(0, max_start + 1, (1,), device=device).item())
+            end = start + mask_len
 
-                if not overlap:
-                    mask[start:end] = 1
-                    mask_segments.append((start, end))
-                    placed = True
+            # Check for overlap
+            if not self._has_overlap(start, end, existing_segments):
+                return (start, end)
 
-        # If we didn't reach target, adjust by extending existing masks slightly
+        return None
+
+    def _has_overlap(
+        self, start: int, end: int, segments: list[tuple[int, int]]
+    ) -> bool:
+        """Check if a segment overlaps with existing segments."""
+        for seg_start, seg_end in segments:
+            if not (end <= seg_start or start >= seg_end):
+                return True
+        return False
+
+    def _adjust_mask_coverage(
+        self,
+        mask: Tensor,
+        mask_segments: list[tuple[int, int]],
+        target_masked: int,
+        length: int,
+    ) -> Tensor:
+        """Adjust mask coverage if below target."""
         current_masked = mask.sum().item()
         if current_masked < target_masked * 0.9 and mask_segments:
             remaining = int(target_masked - current_masked)
