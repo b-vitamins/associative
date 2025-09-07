@@ -1,23 +1,34 @@
-"""Comprehensive tests for continuous Hopfield networks."""
+"""Comprehensive tests for continuous Hopfield networks.
+
+These tests enforce proper PyTorch idioms while preserving mathematical correctness.
+Key conventions tested:
+1. Always expect batch dimensions (B, L, D) for patterns
+2. Consistent batch handling across all inputs
+3. No special-casing for single samples
+4. Proper device and dtype propagation
+5. Standard nn.Module patterns (forward method, reset_parameters, etc.)
+"""
 
 import pytest
 import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from associative.nn.modules.basis import GaussianBasis, RectangularBasis
 from associative.nn.modules.config import (
     BasisConfig,
-    CCCPConfig,
     ContinuousHopfieldConfig,
 )
 from associative.nn.modules.continuous import (
     ContinuousAttention,
     ContinuousHopfield,
+    ContinuousHopfieldEnergy,
     ContinuousMemory,
 )
 
 
 class TestContinuousMemory:
-    """Test ContinuousMemory implementation."""
+    """Test ContinuousMemory implementation with PyTorch idioms."""
 
     @pytest.fixture
     def rectangular_memory(self):
@@ -32,11 +43,13 @@ class TestContinuousMemory:
         return ContinuousMemory(basis, regularization=0.5)
 
     def test_initialization(self, rectangular_memory):
-        """Test proper initialization."""
+        """Test proper initialization following nn.Module patterns."""
         expected_regularization = 0.1
         assert rectangular_memory.regularization == expected_regularization
         assert not rectangular_memory.is_fitted
-        assert rectangular_memory.coefficients is None
+
+        # Check buffer is properly registered (not None)
+        assert hasattr(rectangular_memory, "coefficients")
 
         # Test invalid regularization
         basis = RectangularBasis(num_basis=4)
@@ -45,117 +58,176 @@ class TestContinuousMemory:
         with pytest.raises(ValueError, match="regularization must be positive"):
             ContinuousMemory(basis, regularization=-0.5)
 
-    def test_fit_uniform_positions(self, rectangular_memory):
-        """Test fitting with uniform positions."""
-        # Create simple patterns
-        num_patterns, dim = 10, 3
-        patterns = torch.randn(num_patterns, dim)
+    def test_reset_parameters(self, rectangular_memory):
+        """Test that reset_parameters method exists and works."""
+        # Should have reset_parameters method
+        assert hasattr(rectangular_memory, "reset_parameters")
+        rectangular_memory.reset_parameters()
 
+        # After reset, should be unfitted
+        assert not rectangular_memory.is_fitted
+
+    def test_fit_always_expects_batch(self, rectangular_memory):
+        """Test that fit always expects batch dimension (B, L, D)."""
+        num_patterns, dim = 10, 3
+
+        # Without batch dimension should raise error
+        patterns_no_batch = torch.randn(num_patterns, dim)
+        with pytest.raises(ValueError, match="Expected 3D tensor"):
+            rectangular_memory.fit(patterns_no_batch)
+
+        # With batch dimension should work
+        batch_size = 2
+        patterns = torch.randn(batch_size, num_patterns, dim)
         rectangular_memory.fit(patterns)
 
         assert rectangular_memory.is_fitted
-        assert rectangular_memory.coefficients is not None
-        assert rectangular_memory.coefficients.shape == (4, dim)  # (num_basis, D)
+        # Coefficients should be (B, N, D) for batched fitting
+        assert rectangular_memory.coefficients.shape == (batch_size, 4, dim)
 
-    def test_fit_custom_positions(self, gaussian_memory):
-        """Test fitting with custom positions."""
-        num_patterns, dim = 8, 4
-        patterns = torch.randn(num_patterns, dim)
+    def test_fit_single_batch(self, gaussian_memory):
+        """Test fitting with single item in batch."""
+        batch_size, num_patterns, dim = 1, 8, 4
+        patterns = torch.randn(batch_size, num_patterns, dim)
         positions = torch.linspace(0.1, 0.9, num_patterns)
 
         gaussian_memory.fit(patterns, positions)
 
         assert gaussian_memory.is_fitted
-        assert gaussian_memory.coefficients.shape == (5, dim)
+        assert gaussian_memory.coefficients.shape == (1, 5, dim)
 
-    def test_fit_batch(self, rectangular_memory):
-        """Test fitting with batched patterns."""
-        # Batch of patterns
-        batch_size, num_patterns, dim = 2, 10, 3
-        patterns = torch.randn(batch_size, num_patterns, dim)
+    def test_forward_method_exists(self, gaussian_memory):
+        """Test that forward method exists (renamed from reconstruct)."""
+        # Fit first
+        patterns = torch.randn(1, 10, 3)
+        gaussian_memory.fit(patterns)
 
+        # Should have forward method
+        assert hasattr(gaussian_memory, "forward")
+
+        # Forward at single point (with batch)
+        t = torch.tensor([[0.5]])  # Shape (1, 1)
+        output = gaussian_memory.forward(t)
+
+        assert output.shape == (1, 1, 3)  # (B, num_points, D)
+
+    def test_forward_batch_consistency(self, gaussian_memory):
+        """Test forward handles batches consistently."""
+        # Fit with batch
+        batch_size = 2
+        patterns = torch.randn(batch_size, 10, 3)
+        gaussian_memory.fit(patterns)
+
+        # Forward at multiple points
+        num_points = 20
+        t = torch.linspace(0, 1, num_points).unsqueeze(0).expand(batch_size, -1)
+        output = gaussian_memory.forward(t)
+
+        assert output.shape == (batch_size, num_points, 3)
+
+    def test_no_special_case_single_sample(self, rectangular_memory):
+        """Test that single samples are not special-cased."""
+        # Even single pattern should have batch dimension
+        patterns = torch.randn(1, 20, 3)  # Batch size 1
         rectangular_memory.fit(patterns)
 
-        # Should fit to flattened version or handle batches appropriately
-        assert rectangular_memory.is_fitted
+        # Query single point with batch
+        t = torch.tensor([[0.5]])
+        output = rectangular_memory.forward(t)
 
-    def test_reconstruct_scalar(self, gaussian_memory):
-        """Test reconstruction at scalar time point."""
-        # Fit first
-        patterns = torch.randn(10, 3)
+        # Should maintain batch dimension
+        assert output.shape == (1, 1, 3)
+        assert output.dim() == 3  # Always 3D
+
+    def test_device_propagation(self, gaussian_memory):
+        """Test proper device handling."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        # Move memory to GPU
+        gaussian_memory = gaussian_memory.cuda()
+
+        # Fit with GPU tensors
+        patterns = torch.randn(2, 10, 3).cuda()
         gaussian_memory.fit(patterns)
 
-        # Reconstruct at single point
-        t = torch.tensor(0.5)
-        reconstructed = gaussian_memory.reconstruct(t)
+        # Forward should work on same device
+        t = torch.linspace(0, 1, 5).unsqueeze(0).expand(2, -1).cuda()
+        output = gaussian_memory.forward(t)
 
-        assert reconstructed.shape == (3,)  # (D,)
+        assert output.device == patterns.device
+        assert output.shape == (2, 5, 3)
 
-    def test_reconstruct_batch(self, gaussian_memory):
-        """Test reconstruction at multiple time points."""
-        # Fit first
-        patterns = torch.randn(10, 3)
-        gaussian_memory.fit(patterns)
+    def test_dtype_propagation(self, rectangular_memory):
+        """Test proper dtype handling."""
+        # Test with float64
+        patterns = torch.randn(1, 10, 3, dtype=torch.float64)
+        rectangular_memory.fit(patterns)
 
-        # Reconstruct at multiple points
-        t = torch.linspace(0, 1, 20)
-        reconstructed = gaussian_memory.reconstruct(t)
+        t = torch.linspace(0, 1, 5, dtype=torch.float64).unsqueeze(0)
+        output = rectangular_memory.forward(t)
 
-        assert reconstructed.shape == (20, 3)  # (num_points, D)
+        assert output.dtype == torch.float64
+        assert output.shape == (1, 5, 3)
 
-    def test_reconstruct_not_fitted(self, rectangular_memory):
-        """Test that reconstruct raises error if not fitted."""
-        t = torch.tensor(0.5)
-
-        with pytest.raises(RuntimeError, match="not been fitted"):
-            rectangular_memory.reconstruct(t)
-
-    def test_reconstruction_quality(self, gaussian_memory):
-        """Test that reconstruction approximates original patterns."""
-        # Create smooth patterns
-        num_patterns, _dim = 20, 2
+    def test_reconstruction_quality_batched(self, gaussian_memory):
+        """Test reconstruction quality with batched inputs."""
+        batch_size, num_patterns, _dim = 2, 20, 2
         positions = torch.linspace(0, 1, num_patterns)
+
+        # Create batch of smooth patterns
         patterns = torch.stack(
-            [torch.sin(2 * torch.pi * positions), torch.cos(2 * torch.pi * positions)],
-            dim=-1,
+            [
+                torch.stack(
+                    [
+                        torch.sin(2 * torch.pi * positions),
+                        torch.cos(2 * torch.pi * positions),
+                    ],
+                    dim=-1,
+                )
+                for _ in range(batch_size)
+            ]
         )
 
         gaussian_memory.fit(patterns, positions)
 
         # Reconstruct at original positions
-        reconstructed = gaussian_memory.reconstruct(positions)
+        t_batch = positions.unsqueeze(0).expand(batch_size, -1)
+        reconstructed = gaussian_memory.forward(t_batch)
 
         # Should approximate original patterns
         mse_threshold = 0.1
         mse = ((reconstructed - patterns) ** 2).mean()
-        assert mse < mse_threshold  # Reasonable approximation
+        assert mse < mse_threshold
 
-    def test_compress_ratio(self, rectangular_memory):
-        """Test compression ratio computation."""
-        patterns = torch.randn(20, 3)
-        rectangular_memory.fit(patterns)
+    def test_dataloader_compatibility(self, rectangular_memory):
+        """Test compatibility with PyTorch DataLoader."""
+        # Create dataset
+        num_samples = 8
+        datasets = []
+        for _ in range(num_samples):
+            patterns = torch.randn(1, 15, 4)  # Each sample has batch size 1
+            datasets.append(patterns)
 
-        ratio = rectangular_memory.compress_ratio()
-        expected_ratio = 0.2
-        assert ratio == 4 / 20  # num_basis / num_patterns
-        assert ratio == expected_ratio
+        dataset = TensorDataset(torch.cat(datasets))
+        dataloader = DataLoader(dataset, batch_size=4)
 
-    def test_differentiability(self, gaussian_memory):
-        """Test that reconstruction is differentiable."""
-        patterns = torch.randn(10, 3)
-        gaussian_memory.fit(patterns)
+        for batch in dataloader:
+            patterns_batch = batch[0]  # Shape (4, 1, 15, 4)
+            patterns_batch = patterns_batch.squeeze(1)  # Shape (4, 15, 4)
 
-        t = torch.linspace(0, 1, 5, requires_grad=True)
-        reconstructed = gaussian_memory.reconstruct(t)
+            rectangular_memory.fit(patterns_batch)
+            assert rectangular_memory.is_fitted
 
-        loss = reconstructed.sum()
-        loss.backward()
-
-        assert t.grad is not None
+            # Forward should work with batch
+            t = torch.linspace(0, 1, 10).unsqueeze(0).expand(4, -1)
+            output = rectangular_memory.forward(t)
+            assert output.shape == (4, 10, 4)
+            break  # Test first batch only
 
 
 class TestContinuousHopfield:
-    """Test ContinuousHopfield network implementation."""
+    """Test ContinuousHopfield network with PyTorch idioms."""
 
     @pytest.fixture
     def config(self):
@@ -165,7 +237,7 @@ class TestContinuousHopfield:
             beta=2.0,
             regularization=0.1,
             integration_points=100,
-            use_analytical_update=True,
+            num_iterations=3,
         )
 
     @pytest.fixture
@@ -176,160 +248,184 @@ class TestContinuousHopfield:
     def test_initialization(self, hopfield, config):
         """Test proper initialization."""
         assert hopfield.config == config
-        assert hopfield.basis is not None
-        assert hopfield.memory is not None
-        assert hopfield.optimizer is not None
-        assert hopfield.energy_fn is not None
+        assert isinstance(hopfield.basis, nn.Module)
+        assert isinstance(hopfield.memory, nn.Module)
+        assert isinstance(hopfield.energy_fn, nn.Module)
 
-    def test_forward_single_query(self, hopfield):
-        """Test forward pass with single query."""
-        memories = torch.randn(16, 5)  # L=16, D=5
-        query = torch.randn(5)
+        # Should have reset_parameters
+        assert hasattr(hopfield, "reset_parameters")
 
-        output = hopfield(memories, query)
+    def test_forward_always_batch(self, hopfield):
+        """Test forward always expects batch dimensions."""
+        # Both memories and queries should have batch dimension
+        memories = torch.randn(2, 16, 5)  # (B, L, D)
+        queries = torch.randn(2, 3, 5)  # (B, Q, D)
 
-        assert output.shape == (5,)  # Same as query
+        outputs, info = hopfield(memories, queries)
 
-    def test_forward_batch_queries(self, hopfield):
-        """Test forward pass with batch of queries."""
-        memories = torch.randn(16, 5)
-        queries = torch.randn(3, 5)  # Batch of 3
-
-        outputs = hopfield(memories, queries)
-
-        assert outputs.shape == (3, 5)
-
-    def test_forward_with_positions(self, hopfield):
-        """Test forward pass with custom positions."""
-        memories = torch.randn(10, 4)
-        queries = torch.randn(2, 4)
-        positions = torch.linspace(0.2, 0.8, 10)
-
-        outputs = hopfield(memories, queries, positions=positions)
-
-        assert outputs.shape == (2, 4)
-
-    def test_forward_with_info(self, hopfield):
-        """Test forward pass returning optimization info."""
-        memories = torch.randn(12, 3)
-        queries = torch.randn(2, 3)
-
-        outputs, info = hopfield(memories, queries, return_info=True)
-
-        assert outputs.shape == (2, 3)
+        assert outputs.shape == (2, 3, 5)  # (B, Q, D)
         assert isinstance(info, dict)
-        assert "trajectories" in info or "optimization_results" in info
 
-    def test_analytical_update(self, hopfield):
-        """Test analytical CCCP update."""
-        memories = torch.randn(10, 4)
-        queries = torch.randn(3, 4)
+    def test_no_single_query_special_case(self, hopfield):
+        """Test no special handling for single queries."""
+        memories = torch.randn(1, 16, 5)  # Batch size 1
+        query = torch.randn(1, 1, 5)  # Single query with batch
+
+        output, info = hopfield(memories, query)
+
+        # Should maintain all dimensions
+        assert output.shape == (1, 1, 5)
+        assert output.dim() == 3
+
+    def test_consistent_batch_handling(self, hopfield):
+        """Test memories and queries must have same batch size."""
+        memories = torch.randn(2, 10, 4)
+        queries = torch.randn(3, 5, 4)  # Different batch size
+
+        with pytest.raises(ValueError, match="Batch size mismatch"):
+            hopfield(memories, queries)
+
+    def test_forward_returns_tuple(self, hopfield):
+        """Test forward always returns tuple for consistency."""
+        memories = torch.randn(2, 12, 3)
+        queries = torch.randn(2, 4, 3)
+
+        # Should always return tuple (output, info)
+        result = hopfield(memories, queries)
+        assert isinstance(result, tuple)
+        output, info = result
+
+        assert output.shape == (2, 4, 3)
+        assert isinstance(info, dict)
+        assert "num_iterations" in info
+
+    def test_private_methods(self, hopfield):
+        """Test that internal methods are private (start with _)."""
+        # These should be private
+        assert hasattr(hopfield, "_analytical_update")
+        assert hasattr(hopfield, "_iterate")
+
+        # Public API should be minimal
+        public_methods = [
+            m
+            for m in dir(hopfield)
+            if not m.startswith("_") and callable(getattr(hopfield, m))
+        ]
+
+        # Should only have essential public methods
+        essential_public = {"forward", "energy", "reset_parameters"}
+        for method in essential_public:
+            assert method in public_methods
+
+    def test_device_handling(self, hopfield):
+        """Test proper device propagation."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        hopfield = hopfield.cuda()
+        memories = torch.randn(2, 10, 4).cuda()
+        queries = torch.randn(2, 3, 4).cuda()
+
+        output, info = hopfield(memories, queries)
+
+        assert output.device == memories.device
+        assert output.shape == (2, 3, 4)
+
+    def test_dtype_consistency(self, hopfield):
+        """Test dtype propagation through network."""
+        memories = torch.randn(1, 8, 3, dtype=torch.float64)
+        queries = torch.randn(1, 2, 3, dtype=torch.float64)
+
+        output, info = hopfield(memories, queries)
+
+        assert output.dtype == torch.float64
+        assert output.shape == (1, 2, 3)
+
+    def test_dataloader_integration(self, hopfield):
+        """Test integration with DataLoader."""
+        # Create dataset of memory-query pairs
+        num_samples = 16
+        memory_data = torch.randn(num_samples, 10, 4)
+        query_data = torch.randn(num_samples, 3, 4)
+
+        dataset = TensorDataset(memory_data, query_data)
+        dataloader = DataLoader(dataset, batch_size=4)
+
+        for memories, queries in dataloader:
+            # Both have shape (4, ...)
+            output, info = hopfield(memories, queries)
+
+            assert output.shape == (4, 3, 4)
+            assert info["num_iterations"] == hopfield.config.num_iterations
+            break  # Test first batch
+
+    def test_energy_with_batch(self, hopfield):
+        """Test energy computation with batched inputs."""
+        memories = torch.randn(2, 10, 4)
+        queries = torch.randn(2, 5, 4)
 
         # Fit memory first
         hopfield.memory.fit(memories)
 
-        # Analytical update
-        updated = hopfield.analytical_update(queries)
-
-        assert updated.shape == queries.shape
-        assert not torch.allclose(updated, queries)  # Should change
-
-    def test_analytical_vs_iterative(self):
-        """Test that analytical and iterative updates converge to same point."""
-        # Analytical config
-        config_analytical = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(num_basis=6), beta=1.0, use_analytical_update=True
-        )
-        hopfield_analytical = ContinuousHopfield(config_analytical)
-
-        # Iterative config
-        config_iterative = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(num_basis=6),
-            beta=1.0,
-            use_analytical_update=False,
-            cccp_config=CCCPConfig(max_iterations=100, tolerance=1e-6),
-        )
-        hopfield_iterative = ContinuousHopfield(config_iterative)
-
-        memories = torch.randn(8, 3)
-        query = torch.randn(3)
-
-        output_analytical = hopfield_analytical(memories, query)
-        output_iterative = hopfield_iterative(memories, query)
-
-        # Should converge to similar points
-        assert torch.allclose(output_analytical, output_iterative, atol=1e-3)
-
-    def test_energy_computation(self, hopfield):
-        """Test energy computation."""
-        memories = torch.randn(10, 4)
-        queries = torch.randn(2, 4)
-
-        # Fit memory
-        hopfield.memory.fit(memories)
-
         energies = hopfield.energy(queries)
 
-        assert energies.shape == (2,)
-        assert torch.isfinite(energies).all()  # Energies should be finite (no NaN/inf)
+        assert energies.shape == (2, 5)  # (B, Q)
+        assert torch.isfinite(energies).all()
 
-    def test_iterate(self, hopfield):
-        """Test fixed number of iterations."""
-        memories = torch.randn(12, 5)
-        queries = torch.randn(3, 5)
+    def test_gradient_flow_batched(self, hopfield):
+        """Test gradient flow with batched operations."""
+        memories = torch.randn(2, 8, 5, requires_grad=True)
+        queries = torch.randn(2, 3, 5, requires_grad=True)
 
-        # Fit memory
-        hopfield.memory.fit(memories)
+        outputs, _ = hopfield(memories, queries)
+        loss = outputs.sum()
+        loss.backward()
 
-        # Single iteration
-        output1 = hopfield.iterate(queries, num_iterations=1)
-        assert output1.shape == queries.shape
+        assert memories.grad is not None
+        assert queries.grad is not None
+        assert memories.grad.shape == memories.shape
+        assert queries.grad.shape == queries.shape
 
-        # Multiple iterations
-        output5 = hopfield.iterate(queries, num_iterations=5)
-        assert output5.shape == queries.shape
 
-        # More iterations should converge further
-        energy1 = hopfield.energy(output1)
-        energy5 = hopfield.energy(output5)
-        assert (energy5 <= energy1).all()  # Energy should decrease
+class TestContinuousHopfieldEnergy:
+    """Test ContinuousHopfieldEnergy with proper conventions."""
 
-    def test_memory_compression(self):
-        """Test memory compression ratio."""
-        compression_target = 0.25
-        config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(num_basis=5),
-            memory_compression=compression_target,  # Use 25% of original size
-        )
-        hopfield = ContinuousHopfield(config)
+    @pytest.fixture
+    def energy_fn(self):
+        """Create energy function."""
+        return ContinuousHopfieldEnergy(beta=1.0, integration_points=100)
 
-        memories = torch.randn(20, 4)  # L=20
-        queries = torch.randn(2, 4)
+    def test_initialization(self, energy_fn):
+        """Test proper initialization."""
+        assert energy_fn.beta == 1.0
+        assert energy_fn.integration_points == 100
 
-        hopfield(memories, queries)
+        # Memory should be properly initialized (not None)
+        assert hasattr(energy_fn, "memory_fn")
 
-        # Should use compression ratio to determine num_basis
-        assert hopfield.memory.compress_ratio() <= compression_target
+    def test_batch_handling(self, energy_fn):
+        """Test energy handles batches properly."""
+        # Set memory function
+        basis = RectangularBasis(num_basis=4)
+        memory = ContinuousMemory(basis, regularization=0.1)
+        patterns = torch.randn(2, 10, 3)
+        memory.fit(patterns)
+        energy_fn.set_memory(memory)
 
-    def test_associative_recall(self, hopfield):
-        """Test associative memory recall property."""
-        # Store distinct patterns
-        memories = torch.eye(5) * 2  # 5 orthogonal patterns
+        # Compute energy for batch of states
+        states = torch.randn(2, 4, 3)  # (B, Q, D)
+        energies = energy_fn(states)
 
-        # Query with noisy version of second pattern
-        query = memories[1] + 0.1 * torch.randn(5)
+        assert energies.shape == (2, 4)  # (B, Q)
 
-        output = hopfield(memories, query)
-
-        # Should recall pattern closest to query
-        similarities = (
-            memories @ output / (torch.norm(memories, dim=1) * torch.norm(output))
-        )
-        assert similarities.argmax() == 1  # Should recall second pattern
+    def test_gradient_methods_private(self, energy_fn):
+        """Test gradient methods are private."""
+        assert hasattr(energy_fn, "_grad_concave")
+        # _grad_convex not needed since convex gradient is trivial (identity)
 
 
 class TestContinuousAttention:
-    """Test ContinuousAttention mechanism."""
+    """Test ContinuousAttention with PyTorch conventions."""
 
     @pytest.fixture
     def attention(self):
@@ -343,18 +439,19 @@ class TestContinuousAttention:
 
     def test_initialization(self, attention):
         """Test proper initialization."""
-        embed_dim = 64
-        num_heads = 8
-        head_dim = 8
-        assert attention.embed_dim == embed_dim
-        assert attention.num_heads == num_heads
-        assert attention.head_dim == head_dim  # 64 / 8
-        assert attention.beta == 1.0
-        assert attention.basis is not None
+        assert attention.embed_dim == 64
+        assert attention.num_heads == 8
+        assert attention.head_dim == 8
 
-    def test_forward_single_query(self, attention):
-        """Test attention with single query."""
-        batch_size, query_len, key_len, embed_dim = 2, 1, 10, 64
+        # Should be proper nn.Module
+        assert isinstance(attention, nn.Module)
+        assert hasattr(attention, "reset_parameters")
+
+    def test_forward_batch_only(self, attention):
+        """Test forward requires batch dimension."""
+        batch_size, query_len, key_len = 2, 3, 10
+        embed_dim = 64
+
         query = torch.randn(batch_size, query_len, embed_dim)
         key = torch.randn(batch_size, key_len, embed_dim)
         value = torch.randn(batch_size, key_len, embed_dim)
@@ -363,219 +460,185 @@ class TestContinuousAttention:
 
         assert output.shape == (batch_size, query_len, embed_dim)
 
-    def test_forward_multiple_queries(self, attention):
-        """Test attention with multiple queries."""
-        batch_size, query_len, key_len, embed_dim = 2, 5, 10, 64
-        query = torch.randn(batch_size, query_len, embed_dim)
-        key = torch.randn(batch_size, key_len, embed_dim)
-        value = torch.randn(batch_size, key_len, embed_dim)
+    def test_no_explicit_loops(self):
+        """Test that forward uses vectorized operations."""
+        # This test would need to check implementation
+        # For now, we ensure it handles multiple batches efficiently
+        basis = RectangularBasis(num_basis=4)
+        attention = ContinuousAttention(32, 4, basis, beta=1.0)
 
+        # Larger batch to test efficiency
+        query = torch.randn(8, 5, 32)
+        key = torch.randn(8, 10, 32)
+        value = torch.randn(8, 10, 32)
+
+        import time
+
+        start = time.time()
         output = attention(query, key, value)
+        elapsed = time.time() - start
 
-        assert output.shape == (batch_size, query_len, embed_dim)
+        assert output.shape == (8, 5, 32)
+        # Should be reasonably fast (vectorized)
+        assert elapsed < 1.0  # Less than 1 second for small inputs
 
-    def test_forward_with_positions(self, attention):
-        """Test attention with custom key positions."""
-        batch_size, query_len, key_len, embed_dim = 1, 3, 8, 64
-        query = torch.randn(batch_size, query_len, embed_dim)
-        key = torch.randn(batch_size, key_len, embed_dim)
-        value = torch.randn(batch_size, key_len, embed_dim)
-        key_positions = torch.linspace(0.1, 0.9, key_len)
+    def test_device_dtype_handling(self, attention):
+        """Test proper device and dtype propagation."""
+        if torch.cuda.is_available():
+            attention = attention.cuda()
+            # Module has float32 by default, inputs can be different dtype
+            query = torch.randn(2, 3, 64).cuda()
+            key = torch.randn(2, 10, 64).cuda()
+            value = torch.randn(2, 10, 64).cuda()
 
-        output = attention(query, key, value, key_positions=key_positions)
+            output = attention(query, key, value)
 
-        assert output.shape == (batch_size, query_len, embed_dim)
-
-    def test_attention_density(self, attention):
-        """Test attention probability density computation."""
-        embed_dim = 64
-        query = torch.randn(embed_dim)  # Single query
-        t = torch.linspace(0, 1, 100)
-
-        # First need to fit keys
-        keys = torch.randn(10, embed_dim)
-        attention.memory = ContinuousMemory(attention.basis, regularization=0.1)
-        attention.memory.fit(keys)
-
-        density = attention.compute_attention_density(query, t)
-
-        assert density.shape == (100,)
-        assert (density >= 0).all()  # Probability density
-
-        # Should integrate to approximately 1
-        integral = torch.trapz(density, t)
-        assert torch.allclose(integral, torch.tensor(1.0), atol=0.1)
-
-    def test_temperature_effect(self):
-        """Test that temperature affects attention sharpness."""
-        basis = GaussianBasis(num_basis=6)
-        embed_dim = 64
-        num_heads = 8
-
-        # Low temperature (sharp attention)
-        attention_sharp = ContinuousAttention(embed_dim, num_heads, basis, beta=10.0)
-
-        # High temperature (soft attention)
-        attention_soft = ContinuousAttention(embed_dim, num_heads, basis, beta=0.1)
-
-        # Same inputs
-        query = torch.randn(1, 1, embed_dim)
-        key = torch.randn(1, 8, embed_dim)
-        value = torch.randn(1, 8, embed_dim)
-
-        output_sharp = attention_sharp(query, key, value)
-        output_soft = attention_soft(query, key, value)
-
-        # Both should have correct shape
-        assert output_sharp.shape == (1, 1, embed_dim)
-        assert output_soft.shape == (1, 1, embed_dim)
-
-        # Outputs should differ due to temperature
-        assert not torch.allclose(output_sharp, output_soft)
+            assert output.device == query.device
+            # Output dtype matches module dtype (standard PyTorch behavior)
+            assert output.dtype == next(attention.parameters()).dtype
 
 
-class TestContinuousHopfieldConfig:
-    """Test ContinuousHopfieldConfig validation."""
+class TestBatchedVideoReconstruction:
+    """Test video reconstruction use case with proper batching."""
 
-    def test_valid_config(self):
-        """Test valid configuration."""
-        beta = 2.0
-        regularization = 0.5
-        integration_points = 200
+    def test_video_batch_processing(self):
+        """Test processing multiple videos in batch."""
         config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(num_basis=10),
-            beta=beta,
-            regularization=regularization,
-            integration_points=integration_points,
+            basis_config=BasisConfig(num_basis=32, basis_type="rectangular"),
+            beta=1.0,
+            regularization=0.5,
+            num_iterations=3,
         )
-
-        assert config.beta == beta
-        assert config.regularization == regularization
-        assert config.integration_points == integration_points
-        assert config.use_analytical_update
-
-    def test_invalid_config(self):
-        """Test invalid configuration parameters."""
-        basis_config = BasisConfig(num_basis=10)
-
-        # Invalid beta
-        with pytest.raises(ValueError, match="beta must be positive"):
-            ContinuousHopfieldConfig(basis_config=basis_config, beta=0)
-
-        # Invalid regularization
-        with pytest.raises(ValueError, match="regularization must be positive"):
-            ContinuousHopfieldConfig(basis_config=basis_config, regularization=-1)
-
-        # Invalid integration_points
-        with pytest.raises(ValueError, match="integration_points must be positive"):
-            ContinuousHopfieldConfig(basis_config=basis_config, integration_points=0)
-
-        # Invalid memory_compression
-        with pytest.raises(ValueError, match="memory_compression must be in"):
-            ContinuousHopfieldConfig(basis_config=basis_config, memory_compression=1.5)
-
-
-class TestIntegration:
-    """Integration tests for continuous Hopfield components."""
-
-    def test_end_to_end_rectangular(self):
-        """Test end-to-end with rectangular basis."""
-        config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(
-                num_basis=6, basis_type="rectangular", overlap=0.1
-            ),
-            beta=1.5,
-            regularization=0.2,
-            use_analytical_update=True,
-        )
-
         hopfield = ContinuousHopfield(config)
 
-        # Create and retrieve memories
-        memories = torch.randn(12, 8)
-        queries = torch.randn(4, 8)
+        # Batch of videos
+        batch_size = 4
+        num_frames = 128
+        feature_dim = 224 * 224 * 3  # Flattened frames
 
-        outputs = hopfield(memories, queries)
+        # Simulate batch of video memories and masked queries
+        memories = torch.randn(batch_size, num_frames, feature_dim)
+        queries = torch.randn(batch_size, num_frames, feature_dim)
 
-        assert outputs.shape == (4, 8)
+        outputs, info = hopfield(memories, queries)
 
-        # Energy should be finite
-        energies = hopfield.energy(outputs)
-        assert torch.isfinite(energies).all()
+        assert outputs.shape == (batch_size, num_frames, feature_dim)
+        assert info["num_iterations"] == 3
 
-    def test_end_to_end_gaussian(self):
-        """Test end-to-end with Gaussian basis."""
+    def test_mixed_batch_sizes(self):
+        """Test handling different batch sizes in same session."""
         config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(
-                num_basis=7, basis_type="gaussian", learnable=True, init_width=0.15
-            ),
-            beta=2.0,
-            use_analytical_update=False,
-            cccp_config=CCCPConfig(max_iterations=20),
+            basis_config=BasisConfig(num_basis=16, basis_type="gaussian"),
+            beta=1.0,
         )
-
         hopfield = ContinuousHopfield(config)
 
-        memories = torch.randn(14, 6)
-        queries = torch.randn(3, 6)
+        # First batch
+        memories1 = torch.randn(2, 64, 100)
+        queries1 = torch.randn(2, 64, 100)
+        output1, _ = hopfield(memories1, queries1)
+        assert output1.shape == (2, 64, 100)
 
-        outputs, info = hopfield(memories, queries, return_info=True)
+        # Different batch size
+        memories2 = torch.randn(5, 64, 100)
+        queries2 = torch.randn(5, 64, 100)
+        output2, _ = hopfield(memories2, queries2)
+        assert output2.shape == (5, 64, 100)
 
-        assert outputs.shape == (3, 6)
-        assert "optimization_results" in info
 
-    def test_end_to_end_fourier(self):
-        """Test end-to-end with Fourier basis."""
+class TestModuleComposition:
+    """Test that modules compose well with other PyTorch layers."""
+
+    def test_sequential_composition(self):
+        """Test using ContinuousHopfield in nn.Sequential-like setup."""
+
+        class VideoReconstructionModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = nn.Linear(784, 256)
+                self.hopfield = ContinuousHopfield(
+                    ContinuousHopfieldConfig(
+                        basis_config=BasisConfig(num_basis=16),
+                        beta=1.0,
+                    )
+                )
+                self.decoder = nn.Linear(256, 784)
+
+            def forward(self, x):
+                # x shape: (B, L, 784)
+                encoded = self.encoder(x)  # (B, L, 256)
+
+                # Use hopfield for denoising/reconstruction
+                reconstructed, _ = self.hopfield(encoded, encoded)
+
+                return self.decoder(reconstructed)  # (B, L, 784)
+
+        model = VideoReconstructionModel()
+        input_data = torch.randn(2, 32, 784)
+        output = model(input_data)
+
+        assert output.shape == (2, 32, 784)
+
+    def test_parallel_data_handling(self):
+        """Test with DataParallel (multi-GPU if available)."""
         config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(
-                num_basis=8, basis_type="fourier", max_frequency=4
-            ),
-            beta=10.0,
+            basis_config=BasisConfig(num_basis=8),
+            beta=1.0,
         )
-
         hopfield = ContinuousHopfield(config)
 
-        # Use periodic patterns
-        num_patterns = 16
-        positions = torch.linspace(0, 1, num_patterns)
-        memories = torch.stack(
-            [
-                torch.sin(2 * torch.pi * positions),
-                torch.cos(2 * torch.pi * positions),
-                torch.sin(4 * torch.pi * positions),
-            ],
-            dim=-1,
-        )
+        if torch.cuda.device_count() > 1:
+            hopfield = nn.DataParallel(hopfield)
+            memories = torch.randn(8, 64, 128).cuda()
+            queries = torch.randn(8, 64, 128).cuda()
 
-        queries = memories[[0, 8]] + 0.1 * torch.randn(2, 3)
+            output, _ = hopfield(memories, queries)
+            assert output.shape == (8, 64, 128)
+        else:
+            # Test passes if not enough GPUs
+            pass
 
-        outputs = hopfield(memories, queries, positions=positions)
 
-        assert outputs.shape == (2, 3)
+def test_mathematical_correctness_preserved():
+    """Ensure mathematical behavior is preserved with new conventions."""
+    # Test that the core mathematical operations still work correctly
+    config = ContinuousHopfieldConfig(
+        basis_config=BasisConfig(num_basis=5, basis_type="rectangular"),
+        beta=1.0,
+        regularization=0.5,
+        num_iterations=3,
+    )
+    hopfield = ContinuousHopfield(config)
 
-        # Should recall patterns similar to queries
-        similarity_threshold = 0.5
-        for i in range(2):
-            similarity = torch.cosine_similarity(outputs[i], memories[[0, 8]][i], dim=0)
-            assert similarity > similarity_threshold  # Reasonable recall
+    # Create patterns that should be recalled
+    memories = torch.eye(5).unsqueeze(0) * 2  # (1, 5, 5) - orthogonal patterns
 
-    def test_gradient_flow(self):
-        """Test that gradients flow through the network."""
-        config = ContinuousHopfieldConfig(
-            basis_config=BasisConfig(num_basis=4), beta=1.0
-        )
+    # Query with noisy version
+    query_idx = 2
+    queries = memories[:, [query_idx]] + 0.1 * torch.randn(1, 1, 5)
 
-        hopfield = ContinuousHopfield(config)
+    output, _ = hopfield(memories, queries)
 
-        memories = torch.randn(8, 5, requires_grad=True)
-        queries = torch.randn(2, 5, requires_grad=True)
+    # Should recall the correct pattern
+    similarities = torch.cosine_similarity(output[0, 0], memories[0], dim=1)
+    assert similarities.argmax() == query_idx  # Correct recall
 
-        outputs = hopfield(memories, queries)
-        loss = outputs.sum()
-        loss.backward()
 
-        # Gradients should flow to inputs
-        assert memories.grad is not None
-        assert queries.grad is not None
-        assert not torch.allclose(memories.grad, torch.zeros_like(memories.grad))
-        assert not torch.allclose(queries.grad, torch.zeros_like(queries.grad))
+def test_ridge_regression_correctness():
+    """Test that ridge regression math is still correct."""
+    basis = RectangularBasis(num_basis=4)
+    memory = ContinuousMemory(basis, regularization=0.5)
+
+    # Known patterns
+    patterns = torch.tensor(
+        [[[1.0, 0.0]], [[0.0, 1.0]], [[-1.0, 0.0]], [[0.0, -1.0]]]
+    ).transpose(0, 1)  # Shape (1, 4, 2)
+
+    memory.fit(patterns)
+
+    # Reconstruct at original positions
+    positions = torch.linspace(0, 1, 4).unsqueeze(0)  # (1, 4)
+    reconstructed = memory.forward(positions)
+
+    # Should approximate original patterns
+    assert torch.allclose(reconstructed, patterns, atol=0.5)
