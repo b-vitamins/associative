@@ -237,17 +237,18 @@ class CCCPOptimizer(nn.Module):
         trajectory: list[Tensor] | None = (
             [current_state.clone()] if self.track_trajectory else None
         )
-        energy_history = [energy_fn(current_state).item()]
+        energy_history = [energy_fn(current_state).mean().item()]
         prev_state = None
         converged = False
         num_iterations = 0
         for i in range(self.max_iterations):
             next_state = self.step(energy_fn, current_state, prev_state)
-            diff = torch.norm(next_state - current_state)
+            # Handle batched tensors - compute norm along last dimension and take mean
+            diff = torch.norm(next_state - current_state, dim=-1).mean()
             num_iterations = i + 1
             if self.track_trajectory and trajectory is not None:
                 trajectory.append(next_state.clone())
-            energy_history.append(energy_fn(next_state).item())
+            energy_history.append(energy_fn(next_state).mean().item())
             if diff < self.tolerance:
                 converged = True
                 break
@@ -287,12 +288,13 @@ class CCCPOptimizer(nn.Module):
         grad = energy_fn.grad_concave(current_state) + energy_fn.grad_convex(
             current_state
         )
-        dot = torch.dot(grad, direction)
+        # Handle batched tensors - compute dot product along last dimension
+        dot = (grad * direction).sum(dim=-1).mean()
         alpha = 1.0
-        current_energy = energy_fn(current_state)
+        current_energy = energy_fn(current_state).mean()
         for _ in range(max_backtracks):
             trial_state = current_state + alpha * direction
-            trial_energy = energy_fn(trial_state)
+            trial_energy = energy_fn(trial_state).mean()
             if trial_energy <= current_energy + c * alpha * dot:
                 return alpha
             alpha *= 0.5
