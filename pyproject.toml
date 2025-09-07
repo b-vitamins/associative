@@ -19,19 +19,39 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = "^3.11"
-torch = "^2.0.0"
-torchvision = "^0.15.0"
-torch-geometric = "^2.3.0"
-einops = "^0.6.0"
-tqdm = "^4.65.0"
-hydra-core = "^1.3.0"
-transformers = "^4.45.0"
-huggingface-hub = "^0.25.0"
+# Core ML frameworks (pinned to Guix versions)
+torch = "2.8.0"
+torchvision = "0.23.0"
+torch-geometric = "2.7.0"
+torchaudio = "2.8.0"
+torchmetrics = "1.4.1"
+torchvggish = "*"
+# Transformers and utilities
+transformers = "4.44.2"
+huggingface-hub = "0.32.2"
+einops = "0.8.1"
+# Data processing
+pandas = "2.2.3"
+pyarrow = "21.0.0"
+# Audio processing
+librosa = "0.10.2.post1"
+soundfile = "0.13.1"
+pesq = "0.15"
+pystoi = "0.4.1"
+# Video processing
+decord = "0.6.0"
+# Visualization
+pillow = "11.1.0"
+matplotlib = "3.8.2"
+scikit-learn = "1.6.1"
+# General utilities
+tqdm = "4.67.1"
+hydra-core = "1.3.2"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^7.0.0"
-pytest-cov = "^4.0.0"
-ruff = "^0.1.0"
+pytest = "8.3.3"
+pytest-cov = "6.2.1"
+ruff = "0.9.5"
 
 [build-system]
 requires = ["poetry-core"]
@@ -52,9 +72,11 @@ ignore = ["E501", "S101"]
 "associative/nn/modules/vision.py" = ["PLR0913"] # Init needs many vision params
 "associative/nn/modules/optimization.py" = ["PLR0913"] # Init needs many CCCP params
 "associative/nn/modules/continuous.py" = ["PLR0913"] # Init needs many params
+"associative/nn/modules/hopfield.py" = ["PLR0913"] # Init needs many cross-modal params
 "associative/nn/modules/transformer.py" = ["PLR0913"] # Forward methods need many params
 "associative/utils/graph.py" = ["PLR0913"] # Graph utilities need many params
-"associative/utils/video/**.py" = ["PLR0913"] # Video utilities need many params
+"associative/utils/video/**.py" = ["PLR0913", "N812"] # Video utilities need many params; functional as F is convention
+"tests/unit/utils/video/**.py" = ["N812"] # Allow functional as F import convention
 "examples/.py" = ["PLR0913", "PLR0915", "PLR2004"] # Training scripts and examples need many params, statements, and magic values
 
 [tool.ruff.format]
