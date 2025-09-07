@@ -1,7 +1,9 @@
 """Masking utilities for temporal and spatial data.
 
 This module provides utilities for creating masks for various reconstruction
-and autoencoding tasks, including temporal masking for video/sequence data.
+and autoencoding tasks, including temporal masking for video/sequence data,
+random masking for self-supervised learning, and block-based masking for
+testing temporal coherence in neural network models.
 """
 
 import torch

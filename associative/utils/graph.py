@@ -1,4 +1,9 @@
-"""Graph utilities for associative memory models."""
+"""Graph utilities for associative memory models.
+
+This module provides utilities for processing graph data structures including
+positional encoding computation, batch preparation for graph transformers,
+and mask generation for graph-based masked language modeling tasks.
+"""
 
 import torch
 from torch import Tensor

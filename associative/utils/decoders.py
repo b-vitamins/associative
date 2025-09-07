@@ -60,7 +60,11 @@ class VideoDecoder(nn.Module):
             self.to(dtype)
 
     def _build_layers(self):
-        """Build decoder layers."""
+        """Build decoder layers with progressive upsampling architecture.
+        
+        Creates an initial embedding projection layer followed by transposed
+        convolutional layers for spatial upsampling to reconstruct video frames.
+        """
         # Calculate initial spatial size for progressive upsampling
         num_upsample_layers = len(self.hidden_dims)
         self.initial_size = max(4, self.height // (2**num_upsample_layers))
@@ -194,7 +198,11 @@ class AudioDecoder(nn.Module):
             self.to(dtype)
 
     def _build_layers(self):
-        """Build audio decoder layers."""
+        """Build audio decoder layers with 1D progressive upsampling.
+        
+        Creates an initial embedding projection followed by 1D transposed
+        convolutional layers for temporal upsampling to generate audio waveforms.
+        """
         # Calculate initial length for progressive upsampling
         num_upsample = len(self.hidden_dims)
         self.initial_length = max(64, self.num_samples // (2**num_upsample))
@@ -323,7 +331,12 @@ class CrossModalDecoder(nn.Module):
             self.to(dtype)
 
     def _build_layers(self):
-        """Build cross-modal translation layers."""
+        """Build cross-modal translation layers.
+        
+        Creates a source encoder that maps input embeddings to a bridge
+        representation, and a target decoder that generates the output
+        modality from the bridge representation.
+        """
         # Source encoder: map to bridge representation
         self.source_encoder = nn.Sequential(
             nn.Linear(self.input_dim, self.bridge_dim * 2),
@@ -436,7 +449,12 @@ class HierarchicalVideoDecoder(nn.Module):
             self.to(dtype)
 
     def _build_layers(self):
-        """Build hierarchical decoder levels."""
+        """Build hierarchical decoder levels at multiple resolutions.
+        
+        Creates separate VideoDecoder instances for each hierarchy level,
+        with progressively finer resolutions and reduced hidden dimensions
+        for coarser levels.
+        """
         self.level_decoders = nn.ModuleList()
 
         # Create decoder for each level

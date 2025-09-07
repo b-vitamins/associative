@@ -1,4 +1,9 @@
-"""Training utilities for consistent logging and monitoring."""
+"""Training utilities for consistent logging and monitoring.
+
+This module provides utilities for tracking training progress, calculating
+reconstruction metrics (PSNR, SSIM), and formatting model information
+for neural network training pipelines.
+"""
 
 import math
 import time
@@ -8,7 +13,11 @@ from torch.nn import functional
 
 
 class MetricTracker:
-    """Track and display training metrics consistently."""
+    """Track and display training metrics consistently.
+    
+    Provides functionality to track training/validation metrics across epochs,
+    measure training time, and format metrics for consistent logging output.
+    """
 
     def __init__(self):
         self.metrics = {}
@@ -16,25 +25,44 @@ class MetricTracker:
         self.epoch_start_time = None
 
     def start_epoch(self):
-        """Mark the start of an epoch."""
+        """Mark the start of an epoch for timing purposes."""
         self.epoch_start_time = time.time()
 
     def update(self, metrics: dict[str, float]):
-        """Update metrics."""
+        """Update stored metrics with new values.
+        
+        Args:
+            metrics: Dictionary of metric names to values.
+        """
         self.metrics.update(metrics)
 
     def get_epoch_time(self) -> float:
-        """Get time elapsed in current epoch."""
+        """Get time elapsed in current epoch.
+        
+        Returns:
+            Seconds elapsed since start_epoch() was called.
+        """
         if self.epoch_start_time is None:
             return 0.0
         return time.time() - self.epoch_start_time
 
     def get_total_time(self) -> float:
-        """Get total training time."""
+        """Get total training time since initialization.
+        
+        Returns:
+            Total seconds elapsed since tracker creation.
+        """
         return time.time() - self.start_time
 
     def format_time(self, seconds: float) -> str:
-        """Format time in human-readable format."""
+        """Format time in human-readable format.
+        
+        Args:
+            seconds: Time duration in seconds.
+            
+        Returns:
+            Formatted time string (e.g., "1.5m", "2.3h").
+        """
         seconds_per_minute = 60
         seconds_per_hour = 3600
 
@@ -52,7 +80,18 @@ class MetricTracker:
         val_metrics: dict[str, float] | None = None,
         test_metrics: dict[str, float] | None = None,
     ):
-        """Log epoch metrics in a consistent format."""
+        """Log epoch metrics in a consistent format.
+        
+        Args:
+            epoch: Current epoch number.
+            total_epochs: Total number of training epochs.
+            train_metrics: Training metrics dictionary.
+            val_metrics: Optional validation metrics dictionary.
+            test_metrics: Optional test metrics dictionary.
+            
+        Returns:
+            Formatted log string for the epoch.
+        """
         epoch_time = self.get_epoch_time()
         total_time = self.get_total_time()
 
@@ -92,7 +131,20 @@ class MetricTracker:
         metrics: dict[str, float],
         lr: float | None = None,
     ):
-        """Log batch metrics in a consistent format."""
+        """Log batch metrics in a consistent format.
+        
+        Only logs every 10th batch to reduce noise, plus the final batch.
+        
+        Args:
+            epoch: Current epoch number.
+            batch: Current batch index.
+            total_batches: Total number of batches per epoch.
+            metrics: Batch metrics dictionary.
+            lr: Optional learning rate to include.
+            
+        Returns:
+            Formatted log string for the batch, or None if not logging.
+        """
         # Only log every 10th batch to reduce noise
         if batch % 10 != 0 and batch != total_batches - 1:
             return None
@@ -111,12 +163,27 @@ class MetricTracker:
 
 
 def count_parameters(model: torch.nn.Module) -> int:
-    """Count trainable parameters in a model."""
+    """Count trainable parameters in a model.
+    
+    Args:
+        model: PyTorch model to count parameters for.
+        
+    Returns:
+        Total number of trainable parameters.
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def format_model_info(model: torch.nn.Module, name: str = "Model") -> str:
-    """Format model information consistently."""
+    """Format model information consistently.
+    
+    Args:
+        model: PyTorch model to format information for.
+        name: Display name for the model.
+        
+    Returns:
+        Formatted string with model name and parameter count.
+    """
     num_params = count_parameters(model)
     return f"{name}: {num_params:,} parameters"
 

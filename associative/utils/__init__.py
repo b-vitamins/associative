@@ -1,4 +1,8 @@
-"""Utility modules."""
+"""Utility modules for associative memory models.
+
+This package provides utility functions for graph processing, masking operations,
+and other helper functions used across the associative memory framework.
+"""
 
 from .graph import (
     create_graph_mask_indices,
