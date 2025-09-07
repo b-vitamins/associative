@@ -201,7 +201,11 @@ class RectangularBasis(BasisFunction):
 
         # Check if t is within [lower, upper)
         within_bounds = (t_expanded >= lower_bound) & (t_expanded < upper_bound)
-        result = within_bounds.float()
+
+        # Scale by 1/sqrt(width) for orthonormality
+        # Integral of psi_i^2 = width * (1/sqrt(width))^2 = 1
+        scale = 1.0 / torch.sqrt(torch.tensor(self.width))
+        result = within_bounds.float() * scale
 
         # Attach grad_fn without changing values
         result = result + 0.0 * t_expanded

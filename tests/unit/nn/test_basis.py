@@ -70,14 +70,15 @@ class TestRectangularBasis:
         t = torch.tensor(0.125)  # Should be in first basis function
         psi = rectangular_basis.evaluate(t)
         assert psi.shape == (4,)
-        assert psi[0] == 1.0  # First basis function active
+        # Normalized rectangular basis has value 1/sqrt(width) = 1/sqrt(0.25) = 2.0
+        assert psi[0] == 2.0  # First basis function active (normalized)
         assert psi[1:].sum() == 0.0  # Others inactive
 
         # Test at boundary
         t = torch.tensor(0.25)  # Boundary between first and second
         psi = rectangular_basis.evaluate(t)
         # Depending on implementation, either first or second is active
-        assert psi.sum() == 1.0  # Exactly one active
+        assert psi.sum() == 2.0  # Exactly one active (normalized)
 
     def test_evaluate_batch(self, rectangular_basis):
         """Test evaluation at multiple time points."""
@@ -86,7 +87,8 @@ class TestRectangularBasis:
         assert psi.shape == (4, 100)
 
         # Each time point should have exactly one active basis (no overlap)
-        assert torch.allclose(psi.sum(dim=0), torch.ones(100))
+        # Normalized value is 1/sqrt(0.25) = 2.0
+        assert torch.allclose(psi.sum(dim=0), 2.0 * torch.ones(100))
 
         # Each basis should be active for roughly 1/4 of the points
         active_counts = (psi > 0).sum(dim=1).float()
@@ -107,7 +109,8 @@ class TestRectangularBasis:
         assert design_matrix.shape == (4, 10)
 
         # Each column should have exactly one non-zero entry (no overlap)
-        assert torch.allclose(design_matrix.sum(dim=0), torch.ones(10))
+        # Normalized value is 1/sqrt(0.25) = 2.0
+        assert torch.allclose(design_matrix.sum(dim=0), 2.0 * torch.ones(10))
 
         # Design matrix should match evaluate
         psi = rectangular_basis.evaluate(time_points)
@@ -524,9 +527,12 @@ class TestContinuousCompressionDesignMatrix:
         seq_len = 100
         design_matrix = compression_rect.compute_design_matrix(seq_len)
 
-        # For rectangular basis, each column should sum to 1 (partition of unity)
+        # For normalized rectangular basis with 8 functions, each column should sum to sqrt(8)
+        # because each basis function has width 1/8 and is scaled by 1/sqrt(1/8) = sqrt(8)
+        num_basis = compression_rect.basis.num_basis
+        expected_sum = torch.sqrt(torch.tensor(float(num_basis)))
         column_sums = design_matrix.sum(dim=0)
-        assert torch.allclose(column_sums, torch.ones(seq_len))
+        assert torch.allclose(column_sums, torch.full((seq_len,), expected_sum.item()))
 
         # Values should be non-negative (rectangular basis is always >= 0)
         assert (design_matrix >= 0).all()
