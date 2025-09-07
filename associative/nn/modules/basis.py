@@ -573,7 +573,7 @@ class ContinuousCompression(nn.Module):
     def __init__(
         self,
         basis: BasisFunction,
-        regularization: float = 0.01,
+        regularization: float = 0.5,
         cache_operators: bool = False,
     ):
         """Initialize continuous compression module.
