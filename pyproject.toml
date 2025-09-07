@@ -43,6 +43,7 @@ decord = "0.6.0"
 # Visualization
 pillow = "11.1.0"
 matplotlib = "3.8.2"
+seaborn = "0.13.2"
 scikit-learn = "1.6.1"
 # General utilities
 tqdm = "4.67.1"

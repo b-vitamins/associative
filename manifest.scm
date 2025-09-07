@@ -4,8 +4,8 @@
  '(;; Core Python
    "python"
    ;; Runtime dependencies
-   "python-pytorch"
-   "python-torchvision"
+   "python-pytorch-cuda"
+   "python-torchvision-cuda"
    "python-pytorch-geometric"
    "python-transformers"
    "python-einops"
@@ -14,8 +14,8 @@
    "python-pandas"
    "python-pesq"
    "python-pystoi"
-   "python-torchaudio"
-   "python-torchvggish"
+   "python-torchaudio-cuda"
+   "python-torchvggish-cuda"
    "python-torchmetrics"
    "python-pyarrow"
    "python-librosa"
@@ -25,6 +25,7 @@
    ;; Visualization and analysis
    "python-pillow"
    "python-matplotlib"
+   "python-seaborn"
    "python-scikit-learn"
    ;; Development dependencies
    "python-pytest"

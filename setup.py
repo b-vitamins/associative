@@ -76,6 +76,7 @@ setup(
         # Visualization
         "pillow>=10.0.0,<12.0.0",  # 11.1.0 in Guix
         "matplotlib>=3.5.0,<4.0.0",  # 3.8.2 in Guix
+        "seaborn>=0.13.0,<1.0.0",  # 0.13.2 in Guix
         "scikit-learn>=1.0.0,<2.0.0",  # 1.6.1 in Guix
         # General utilities
         "tqdm>=4.60.0,<5.0.0",  # 4.67.1 in Guix
