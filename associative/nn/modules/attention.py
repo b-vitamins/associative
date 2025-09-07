@@ -139,7 +139,7 @@ class GraphEnergyAttention(nn.Module):
 
     Attributes:
         embed_dim: Input embedding dimension
-        num_heads: Number of attention heads  
+        num_heads: Number of attention heads
         qk_dim: Dimension of query/key projections
         head_mix: Parameter matrix for mixing attention heads
         temperature: Per-head temperature scaling factors
@@ -465,7 +465,7 @@ class MultimodalEnergyAttention(nn.Module):
 
     def _get_beta(self) -> float:
         """Get beta scaling factor for numerical stability.
-        
+
         Returns:
             Beta value: β = 1/√Y where Y is the query/key dimension
         """
@@ -474,7 +474,7 @@ class MultimodalEnergyAttention(nn.Module):
     def _compute_intra_energy(self, x: Tensor, modality: str) -> Tensor:
         """Compute intra-modal energy with regularization.
 
-        Computes E^intra = -1/β Σ log ∫exp(βs(t))dt + ||x||²/2 where s(t) are 
+        Computes E^intra = -1/β Σ log ∫exp(βs(t))dt + ||x||²/2 where s(t) are
         attention scores with continuous compression.
 
         Args:
@@ -512,7 +512,7 @@ class MultimodalEnergyAttention(nn.Module):
 
         Args:
             x_source: Source modality features
-            x_target: Target modality features  
+            x_target: Target modality features
             source: Name of source modality
             target: Name of target modality
 

@@ -14,7 +14,7 @@ from torch.nn import functional
 
 class MetricTracker:
     """Track and display training metrics consistently.
-    
+
     Provides functionality to track training/validation metrics across epochs,
     measure training time, and format metrics for consistent logging output.
     """
@@ -30,7 +30,7 @@ class MetricTracker:
 
     def update(self, metrics: dict[str, float]):
         """Update stored metrics with new values.
-        
+
         Args:
             metrics: Dictionary of metric names to values.
         """
@@ -38,7 +38,7 @@ class MetricTracker:
 
     def get_epoch_time(self) -> float:
         """Get time elapsed in current epoch.
-        
+
         Returns:
             Seconds elapsed since start_epoch() was called.
         """
@@ -48,7 +48,7 @@ class MetricTracker:
 
     def get_total_time(self) -> float:
         """Get total training time since initialization.
-        
+
         Returns:
             Total seconds elapsed since tracker creation.
         """
@@ -56,10 +56,10 @@ class MetricTracker:
 
     def format_time(self, seconds: float) -> str:
         """Format time in human-readable format.
-        
+
         Args:
             seconds: Time duration in seconds.
-            
+
         Returns:
             Formatted time string (e.g., "1.5m", "2.3h").
         """
@@ -81,14 +81,14 @@ class MetricTracker:
         test_metrics: dict[str, float] | None = None,
     ):
         """Log epoch metrics in a consistent format.
-        
+
         Args:
             epoch: Current epoch number.
             total_epochs: Total number of training epochs.
             train_metrics: Training metrics dictionary.
             val_metrics: Optional validation metrics dictionary.
             test_metrics: Optional test metrics dictionary.
-            
+
         Returns:
             Formatted log string for the epoch.
         """
@@ -132,16 +132,16 @@ class MetricTracker:
         lr: float | None = None,
     ):
         """Log batch metrics in a consistent format.
-        
+
         Only logs every 10th batch to reduce noise, plus the final batch.
-        
+
         Args:
             epoch: Current epoch number.
             batch: Current batch index.
             total_batches: Total number of batches per epoch.
             metrics: Batch metrics dictionary.
             lr: Optional learning rate to include.
-            
+
         Returns:
             Formatted log string for the batch, or None if not logging.
         """
@@ -164,10 +164,10 @@ class MetricTracker:
 
 def count_parameters(model: torch.nn.Module) -> int:
     """Count trainable parameters in a model.
-    
+
     Args:
         model: PyTorch model to count parameters for.
-        
+
     Returns:
         Total number of trainable parameters.
     """
@@ -176,11 +176,11 @@ def count_parameters(model: torch.nn.Module) -> int:
 
 def format_model_info(model: torch.nn.Module, name: str = "Model") -> str:
     """Format model information consistently.
-    
+
     Args:
         model: PyTorch model to format information for.
         name: Display name for the model.
-        
+
     Returns:
         Formatted string with model name and parameter count.
     """

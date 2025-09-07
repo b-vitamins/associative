@@ -23,7 +23,7 @@ class EnergyLayerNorm(nn.Module):
 
     Attributes:
         normalized_shape: Shape of the normalization (single int for feature dimension)
-        eps: Small epsilon for numerical stability  
+        eps: Small epsilon for numerical stability
         elementwise_affine: Whether to apply learnable affine transformation
     """
 

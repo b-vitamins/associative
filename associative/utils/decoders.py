@@ -61,7 +61,7 @@ class VideoDecoder(nn.Module):
 
     def _build_layers(self):
         """Build decoder layers with progressive upsampling architecture.
-        
+
         Creates an initial embedding projection layer followed by transposed
         convolutional layers for spatial upsampling to reconstruct video frames.
         """
@@ -199,7 +199,7 @@ class AudioDecoder(nn.Module):
 
     def _build_layers(self):
         """Build audio decoder layers with 1D progressive upsampling.
-        
+
         Creates an initial embedding projection followed by 1D transposed
         convolutional layers for temporal upsampling to generate audio waveforms.
         """
@@ -332,7 +332,7 @@ class CrossModalDecoder(nn.Module):
 
     def _build_layers(self):
         """Build cross-modal translation layers.
-        
+
         Creates a source encoder that maps input embeddings to a bridge
         representation, and a target decoder that generates the output
         modality from the bridge representation.
@@ -450,7 +450,7 @@ class HierarchicalVideoDecoder(nn.Module):
 
     def _build_layers(self):
         """Build hierarchical decoder levels at multiple resolutions.
-        
+
         Creates separate VideoDecoder instances for each hierarchy level,
         with progressively finer resolutions and reduced hidden dimensions
         for coarser levels.

@@ -76,14 +76,14 @@ class ReconstructionLoss(nn.Module):
 
     def _compute_base_loss(self, pred: Tensor, target: Tensor) -> Tensor:
         """Compute base reconstruction loss without masking.
-        
+
         Args:
             pred: Predicted reconstruction tensor.
             target: Ground truth target tensor.
-            
+
         Returns:
             Computed loss based on the configured loss type.
-            
+
         Raises:
             ValueError: If loss type is unknown.
         """
@@ -99,12 +99,12 @@ class ReconstructionLoss(nn.Module):
         self, pred: Tensor, target: Tensor, mask: Tensor
     ) -> Tensor:
         """Compute loss only on masked regions.
-        
+
         Args:
             pred: Predicted reconstruction tensor.
             target: Ground truth target tensor.
             mask: Binary mask tensor (1 = include, 0 = exclude).
-            
+
         Returns:
             Loss computed only over masked (valid) regions.
         """
@@ -170,7 +170,7 @@ class ReconstructionLoss(nn.Module):
 
     def _init_perceptual_net(self, device: torch.device):
         """Initialize perceptual loss network using VGG16 features.
-        
+
         Args:
             device: Device to move the network to.
         """

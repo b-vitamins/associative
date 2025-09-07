@@ -26,7 +26,7 @@ class PatchEmbed(nn.Module):
 
     Attributes:
         img_size: Input image dimensions (height, width)
-        patch_size: Patch dimensions (height, width) 
+        patch_size: Patch dimensions (height, width)
         num_patches: Total number of patches per image
         to_patches: Function to extract and flatten patches
         proj: Linear projection layer
