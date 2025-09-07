@@ -17,24 +17,23 @@ Usage:
 """
 
 import json
+import logging
 import os
-import warnings
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import numpy as np
 import torch
 from decord import VideoReader, cpu
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, list_repo_files  # type: ignore[import]
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
 
-# Suppress warnings for clean output
-warnings.filterwarnings("ignore")
+logger = logging.getLogger(__name__)
 
 
-class MovieChat1K(Dataset):
+class MovieChat1K(Dataset[dict[str, Any]]):
     """MovieChat-1K video dataset.
 
     This dataset automatically downloads videos from Hugging Face on first use
@@ -49,9 +48,10 @@ class MovieChat1K(Dataset):
         download: If True, download dataset if not found
         max_videos: Maximum number of videos to use (None for all, for testing only)
         download_features: If True, also download pre-extracted features (train split only; default False)
+        seed: Random seed for deterministic frame sampling (default None for random)
+        validate_videos: If True, validate video files during initialization (default False)
     """
 
-    # Dataset configuration
     HF_REPO_IDS: ClassVar[dict[str, str]] = {
         "train": "Enxin/MovieChat-1K_train",
         "test": "Enxin/MovieChat-1K-test",
@@ -82,32 +82,57 @@ class MovieChat1K(Dataset):
         download: bool = True,
         max_videos: int | None = None,
         download_features: bool = False,
+        seed: int | None = None,
+        validate_videos: bool = False,
     ):
-        """Initialize MovieChat-1K dataset."""
-        # Use XDG compliant cache directory
+        """Initialize MovieChat-1K dataset.
+
+        Sets up directories, validates parameters, downloads data if needed,
+        and prepares the dataset for use.
+
+        Args:
+            root: Root directory for cache. If None, uses XDG_CACHE_HOME/associative/moviechat
+            split: Dataset split ('train' or 'test')
+            num_frames: Number of frames to sample from each video
+            resolution: Frame resolution to resize to
+            transform: Optional transform to apply to frames
+            download: If True, download dataset if not found
+            max_videos: Maximum number of videos to use (None for all)
+            download_features: If True, also download pre-extracted features (train split only)
+            seed: Random seed for deterministic frame sampling
+            validate_videos: If True, validate video files during initialization
+
+        Raises:
+            ValueError: If split is not 'train' or 'test', or if HF_TOKEN is missing when download is True
+            RuntimeError: If video directory doesn't exist and download is False
+        """
         if root is None:
             xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.root = Path(xdg_cache) / "associative" / "moviechat" / split
         else:
             self.root = Path(root).expanduser() / "moviechat" / split
-        self.split = split
-        self.num_frames = num_frames
-        self.resolution = resolution
-        self.transform = transform
-        self.download = download
-        self.max_videos = max_videos
-        self.download_features = download_features
+        self.split: str = split
+        self.num_frames: int = num_frames
+        self.resolution: int = resolution
+        self.transform: Any = transform
+        self.download: bool = download
+        self.max_videos: int | None = max_videos
+        self.download_features: bool = download_features
+        self.seed: int | None = seed
+        self.validate_videos: bool = validate_videos
+        self.samples: list[dict[str, Any]] = []
 
-        # Validate split
+        self.rng: torch.Generator = torch.Generator()
+        if seed is not None:
+            self.rng.manual_seed(seed)
+
         if split not in ["train", "test"]:
             raise ValueError(f"Invalid split '{split}'. Must be 'train' or 'test'")
 
-        # Setup directories
         self.video_dir = self.root / "videos"
         self.metadata_dir = self.root / "metadata"
         self.features_dir = self.root / "features"
 
-        # Get HF token from environment
         self.token = os.getenv("HF_TOKEN")
         if not self.token and download and not self._check_exists():
             raise ValueError(
@@ -116,32 +141,37 @@ class MovieChat1K(Dataset):
                 "Get your token from: https://huggingface.co/settings/tokens"
             )
 
-        # Download if needed
         if download and not self._check_exists():
             self._download()
 
-        # Load video list
         self._load_video_list()
 
-        # Setup default transform if none provided
         if self.transform is None:
             self.transform = transforms.Compose(
                 [
                     transforms.ToPILImage(),
                     transforms.Resize((resolution, resolution)),
                     transforms.ToTensor(),
-                    transforms.Normalize(
-                        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                    ),
                 ]
             )
 
     def _check_exists(self) -> bool:
-        """Check if dataset files exist."""
+        """Check if dataset files exist.
+
+        Returns:
+            bool: True if video directory exists and contains at least one MP4 file.
+        """
         return self.video_dir.exists() and len(list(self.video_dir.glob("*.mp4"))) > 0
 
     def _download(self) -> None:  # noqa: C901
-        """Download dataset from Hugging Face."""
+        """Download dataset from Hugging Face.
+
+        Downloads videos, metadata, and optionally features from the HuggingFace repository.
+        Uses HF_TOKEN from environment for authentication.
+
+        Raises:
+            RuntimeError: If HF_TOKEN is invalid or repository access fails.
+        """
         repo_id = self.HF_REPO_IDS[self.split]
         video_prefix = self.VIDEO_PREFIXES[self.split]
         metadata_prefixes = self.METADATA_PREFIXES[self.split]
@@ -149,12 +179,10 @@ class MovieChat1K(Dataset):
             self.FEATURES_PREFIXES[self.split] if self.download_features else []
         )
 
-        # Create directories
         self.video_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.features_dir.mkdir(parents=True, exist_ok=True)
 
-        # List files in repository
         try:
             files = list_repo_files(repo_id, repo_type="dataset", token=self.token)
         except Exception as e:
@@ -163,10 +191,8 @@ class MovieChat1K(Dataset):
                 f"Error: {e}"
             ) from e
 
-        # Collect all files to download
-        all_files = []
+        all_files: list[tuple[str, Path]] = []
 
-        # Videos (always download)
         video_files = sorted(
             f for f in files if f.startswith(video_prefix) and f.endswith(".mp4")
         )
@@ -174,7 +200,6 @@ class MovieChat1K(Dataset):
             video_files = video_files[: self.max_videos]
         all_files.extend((f, self.video_dir) for f in video_files)
 
-        # Metadata (always download)
         json_files = sorted(
             f
             for f in files
@@ -184,7 +209,6 @@ class MovieChat1K(Dataset):
             json_files = json_files[: self.max_videos]
         all_files.extend((f, self.metadata_dir) for f in json_files)
 
-        # Features (optional)
         if features_prefixes:
             features_files = sorted(
                 f for f in files if any(f.startswith(p) for p in features_prefixes)
@@ -195,10 +219,9 @@ class MovieChat1K(Dataset):
 
         total_files = len(all_files)
         if total_files == 0:
-            print("No files found to download.")
+            logger.info("No files found to download.")
             return
 
-        # Single progress bar for all downloads
         with tqdm(
             total=total_files, desc=f"Downloading {self.split} split", unit="file"
         ) as pbar:
@@ -224,20 +247,77 @@ class MovieChat1K(Dataset):
                         output_path.symlink_to(cache_path)
 
                 except Exception as e:
-                    print(f"Error downloading {file_name}: {e}")
+                    logger.error(f"Error downloading {file_name}: {e}")
                     continue
 
                 pbar.update(1)
 
+    def _validate_video_files(self, video_files: list[Path]) -> list[Path]:
+        """Validate video files can be opened and contain frames.
+
+        Args:
+            video_files: List of video file paths to validate.
+
+        Returns:
+            List of valid video file paths.
+
+        Raises:
+            RuntimeError: If all videos are invalid.
+        """
+        valid_videos = []
+        for video_path in video_files:
+            try:
+                vr = VideoReader(str(video_path.resolve()), ctx=cpu(0))
+                if len(vr) > 0:
+                    valid_videos.append(video_path)  # type: ignore[arg-type]
+                else:
+                    logger.warning(f"Skipping empty video: {video_path.name}")
+            except Exception as e:
+                logger.warning(
+                    f"Skipping corrupted/invalid video {video_path.name}: {e}"
+                )
+
+        if len(valid_videos) == 0:  # type: ignore[arg-type]
+            raise RuntimeError(
+                f"No valid videos found in {self.video_dir}. "
+                "All videos appear to be corrupted or empty."
+            )
+
+        return valid_videos  # type: ignore[return-value]
+
+    def _load_metadata(self, video_id: str) -> dict[str, Any]:
+        """Load metadata for a video if it exists.
+
+        Args:
+            video_id: ID of the video to load metadata for.
+
+        Returns:
+            Metadata dictionary or empty dict if not found/invalid.
+        """
+        metadata_path = self.metadata_dir / f"{video_id}.json"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path) as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                pass
+        return {}
+
     def _load_video_list(self) -> None:
-        """Load list of available videos."""
+        """Load list of available videos.
+
+        Scans video directory for MP4 files, optionally validates them,
+        and creates sample list with metadata.
+
+        Raises:
+            RuntimeError: If video directory doesn't exist or no videos found.
+        """
         if not self.video_dir.exists():
             raise RuntimeError(
                 f"Video directory {self.video_dir} does not exist. "
                 "Set download=True to download the dataset."
             )
 
-        # Get all video files
         video_files = sorted(self.video_dir.glob("*.mp4"))
 
         if len(video_files) == 0:
@@ -246,118 +326,119 @@ class MovieChat1K(Dataset):
                 "Set download=True to download the dataset."
             )
 
-        # Limit if specified
+        if self.validate_videos:
+            video_files = self._validate_video_files(video_files)
+
         if self.max_videos is not None:
             video_files = video_files[: self.max_videos]
 
-        # Create sample list
         self.samples = []
         for video_path in video_files:
             video_id = video_path.stem
-
-            # Try to load metadata if available
-            metadata_path = self.metadata_dir / f"{video_id}.json"
-            metadata = {}
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        metadata = json.load(f)
-                except json.JSONDecodeError:
-                    pass
-
             self.samples.append(
                 {
                     "video_path": video_path,
                     "video_id": video_id,
-                    "metadata": metadata,
+                    "metadata": self._load_metadata(video_id),
                 }
             )
 
     def _load_video_frames(self, video_path: Path) -> torch.Tensor:
         """Load and sample frames from a video file.
 
+        Loads video, samples frames uniformly, applies transforms, and handles
+        errors gracefully with fallback frames.
+
+        Args:
+            video_path: Path to the video file.
+
         Returns:
-            Tensor of shape [num_frames, C, H, W] if transform includes ToTensor,
-            otherwise [num_frames, H, W, C]
+            torch.Tensor: Tensor of shape [num_frames, C, H, W] if transform includes ToTensor,
+                otherwise [num_frames, H, W, C].
         """
-        # Resolve symlinks to get actual file path
         video_path = video_path.resolve()
 
-        # Load video
         vr = VideoReader(str(video_path), ctx=cpu(0))
         total_frames = len(vr)
 
-        # Sample frame indices uniformly
         if total_frames > self.num_frames:
             indices = torch.linspace(0, total_frames - 1, self.num_frames).long()
         else:
-            # If video has fewer frames than requested, sample all and repeat
             indices = torch.arange(total_frames)
             if len(indices) < self.num_frames:
-                # Repeat frames to reach num_frames
                 repeats = self.num_frames // len(indices) + 1
                 indices = indices.repeat(repeats)[: self.num_frames]
 
-        # Extract frames with EOF handling
-        frames = []
+        frames: list[Any] = []
         for idx in indices:
             try:
-                # Clamp index to valid range to avoid EOF issues
                 safe_idx = min(idx.item(), total_frames - 1)
-                frame = vr[safe_idx].asnumpy()  # [H, W, C]
+                frame = vr[safe_idx].asnumpy()  # type: ignore[attr-defined]
             except Exception as e:
-                # If frame extraction fails, use the last successfully loaded frame
-                # or create a black frame as fallback
                 if frames:
-                    frame = frames[-1] if isinstance(frames[-1], np.ndarray) else frames[-1].numpy()
-                else:
-                    # Create black frame with expected dimensions
-                    frame = np.zeros((224, 224, 3), dtype=np.uint8)
-                print(f"Warning: Failed to load frame {idx.item()}, using fallback")
+                    frame = frames[-1]
+                    logger.warning(
+                        f"Failed to load frame {idx.item()} from {video_path.name}: {e}, reusing last frame"
+                    )
+                    frames.append(frame)
+                    continue
+                frame = np.zeros((self.resolution, self.resolution, 3), dtype=np.uint8)
+                logger.warning(
+                    f"Failed to load frame {idx.item()} from {video_path.name}: {e}, using black frame"
+                )
 
-            # Apply transform if provided
             if self.transform is not None:
                 frame = self.transform(frame)
+                if not isinstance(frame, torch.Tensor | np.ndarray):
+                    raise TypeError(
+                        f"Transform must return torch.Tensor or numpy.ndarray, "
+                        f"got {type(frame).__name__}"
+                    )
 
             frames.append(frame)
 
-        # Stack frames
+        result: torch.Tensor
         if isinstance(frames[0], torch.Tensor):
-            frames = torch.stack(frames)  # [num_frames, C, H, W]
+            result = torch.stack(frames)
         else:
-            frames = np.stack(frames)  # [num_frames, H, W, C]
-            frames = torch.from_numpy(frames)
+            np_frames = np.stack(frames)
+            result = torch.from_numpy(np_frames)  # type: ignore[arg-type]
 
-        return frames
+        return result
 
     def __len__(self) -> int:
-        """Return number of samples in dataset."""
+        """Return number of samples in dataset.
+
+        Returns:
+            int: Number of video samples available.
+        """
         return len(self.samples)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """Get a sample from the dataset.
 
+        Args:
+            index: Index of the sample to retrieve.
+
         Returns:
-            Dictionary containing:
-                - frames: Video frames [num_frames, C, H, W] or [num_frames, H, W, C]
-                - video_id: Video identifier
-                - metadata: Video metadata (captions, QA pairs, etc.)
+            dict: Dictionary containing:
+                - frames: Video frames tensor of shape [num_frames, C, H, W] or [num_frames, H, W, C]
+                - video_id: String identifier for the video
+                - metadata: Optional metadata dictionary with captions, QA pairs, etc.
+                - caption: Optional caption string (if present in metadata)
+                - qa_pairs: Optional QA pairs (if present in metadata)
         """
         sample = self.samples[index]
 
-        # Load video frames
         frames = self._load_video_frames(sample["video_path"])
 
-        # Build output
         output = {
             "frames": frames,
             "video_id": sample["video_id"],
         }
 
-        # Add metadata if available
         if sample["metadata"]:
             output["metadata"] = sample["metadata"]
-            # Extract specific fields if present
             if "caption" in sample["metadata"]:
                 output["caption"] = sample["metadata"]["caption"]
             if "global" in sample["metadata"]:
@@ -366,7 +447,11 @@ class MovieChat1K(Dataset):
         return output
 
     def __repr__(self) -> str:
-        """String representation."""
+        """String representation of the dataset.
+
+        Returns:
+            str: Formatted string with dataset parameters.
+        """
         return (
             f"MovieChat1K(split='{self.split}', "
             f"num_videos={len(self)}, "
@@ -388,8 +473,10 @@ def create_moviechat_dataloader(  # noqa: PLR0913
     download: bool = True,
     max_videos: int | None = None,
     download_features: bool = False,
+    seed: int | None = None,
+    validate_videos: bool = False,
     **kwargs: Any,
-) -> tuple[MovieChat1K, torch.utils.data.DataLoader]:
+) -> tuple[MovieChat1K, torch.utils.data.DataLoader[dict[str, Any]]]:
     """Create MovieChat-1K dataset and dataloader.
 
     Args:
@@ -404,28 +491,25 @@ def create_moviechat_dataloader(  # noqa: PLR0913
         download: Whether to download dataset if not found
         max_videos: Maximum number of videos to use
         download_features: If True, also download pre-extracted features (train split only)
+        seed: Random seed for deterministic frame sampling
+        validate_videos: If True, validate video files during initialization
         **kwargs: Additional arguments for MovieChat1K
 
     Returns:
         Tuple of (dataset, dataloader)
 
     Example:
-        >>> # First time - will download entire dataset
         >>> os.environ["HF_TOKEN"] = "your_token_here"
         >>> dataset, dataloader = create_moviechat_dataloader(
         ...     split="train",
         ...     batch_size=8,
-        ...     # max_videos=10,  # Uncomment to limit for testing
         ... )
         >>> for batch in dataloader:
-        ...     frames = batch["frames"]  # [B, num_frames, C, H, W]
-        ...     # Train your model...
+        ...     frames = batch["frames"]
     """
-    # Default shuffle based on split
     if shuffle is None:
         shuffle = split == "train"
 
-    # Create dataset
     dataset = MovieChat1K(
         root=root,
         split=split,
@@ -434,10 +518,11 @@ def create_moviechat_dataloader(  # noqa: PLR0913
         download=download,
         max_videos=max_videos,
         download_features=download_features,
+        seed=seed,
+        validate_videos=validate_videos,
         **kwargs,
     )
 
-    # Create dataloader
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
