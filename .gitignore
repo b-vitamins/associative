@@ -201,6 +201,7 @@ data/
 examples/checkpoints/
 examples/results/
 examples/*/outputs/
+outputs/
 *.pth
 *.pt
 .idea/
