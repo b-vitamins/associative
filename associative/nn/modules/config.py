@@ -226,7 +226,7 @@ class BasisConfig:
 
     Args:
         num_basis: Number of basis functions
-        basis_type: Type of basis ("rectangular", "gaussian", "fourier")
+        basis_type: Type of basis ("rectangular", "gaussian", "fourier", "polynomial")
         domain: Domain of basis functions as (start, end)
         learnable: Whether basis parameters are learnable
         overlap: Overlap factor for rectangular basis (0-1)
@@ -246,7 +246,7 @@ class BasisConfig:
         if self.num_basis <= 0:
             raise ValueError(f"num_basis must be positive, got {self.num_basis}")
 
-        valid_types = {"rectangular", "gaussian", "fourier"}
+        valid_types = {"rectangular", "gaussian", "fourier", "polynomial"}
         if self.basis_type not in valid_types:
             raise ValueError(
                 f"basis_type must be one of {valid_types}, got {self.basis_type}"
