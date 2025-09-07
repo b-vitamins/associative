@@ -7,6 +7,7 @@ from typing import cast
 import torch
 from torch import Tensor, nn
 from torch.nn import functional
+from torch.utils.checkpoint import checkpoint
 
 from .attention import EnergyAttention, GraphEnergyAttention
 from .config import (
@@ -26,6 +27,18 @@ class EnergyTransformerBlock(nn.Module):
     """Associative memory transformer block.
 
     Combines energy-based attention and Hopfield network for associative memory.
+
+    Mixed Precision Training:
+        block = EnergyTransformerBlock(dim, attn_config, hopfield_config, enable_amp=True)
+        scaler = torch.cuda.amp.GradScaler()
+
+        with torch.cuda.amp.autocast():
+            energy = block(features)
+            loss = energy.mean()
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
     """
 
     def __init__(
@@ -33,12 +46,16 @@ class EnergyTransformerBlock(nn.Module):
         dim: int,
         attention_config: EnergyAttentionConfig,
         hopfield_config: HopfieldConfig,
+        use_gradient_checkpointing: bool = False,
+        enable_amp: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
 
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.enable_amp = enable_amp
         self.attn = EnergyAttention(attention_config, **factory_kwargs)
         self.mlp = Hopfield(dim, config=hopfield_config, **factory_kwargs)
 
@@ -47,9 +64,34 @@ class EnergyTransformerBlock(nn.Module):
     ) -> Tensor:
         """Compute block energy."""
         # Note: norm is applied outside in the evolve loop, not here
-        attn_energy = self.attn(hidden_states, attention_mask)
-        mlp_energy = self.mlp(hidden_states)
-        return attn_energy + mlp_energy
+        device_type = "cuda" if hidden_states.is_cuda else "cpu"
+
+        with torch.autocast(device_type=device_type, enabled=self.enable_amp):
+            attn_energy = self.attn(hidden_states, attention_mask)
+            mlp_energy = self.mlp(hidden_states)
+
+        # Energy computation should remain in fp32 for numerical stability
+        with torch.autocast(device_type=device_type, enabled=False):
+            # Convert to fp32 if needed and add
+            if self.enable_amp:
+                attn_energy = attn_energy.float()
+                mlp_energy = mlp_energy.float()
+            return attn_energy + mlp_energy
+
+    def checkpointed_forward(
+        self, hidden_states: Tensor, attention_mask: Tensor | None = None
+    ) -> Tensor:
+        """Forward pass with gradient checkpointing."""
+        if self.training and self.use_gradient_checkpointing:
+            result = checkpoint(
+                self.energy,
+                hidden_states,
+                attention_mask,
+                use_reentrant=True,
+                preserve_rng_state=False,
+            )
+            return cast(Tensor, result)
+        return self.energy(hidden_states, attention_mask)
 
     def forward(
         self, hidden_states: Tensor, attention_mask: Tensor | None = None
@@ -68,12 +110,16 @@ class EnergyTransformer(nn.Module):
     def __init__(
         self,
         config: EnergyTransformerConfig,
+        use_gradient_checkpointing: bool = False,
+        enable_amp: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.config = config
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.enable_amp = enable_amp
 
         # Compute image size from num_patches and patch_size
         self.img_size = int(math.sqrt(config.num_patches) * config.patch_size)
@@ -127,6 +173,8 @@ class EnergyTransformer(nn.Module):
                             config.embed_dim,
                             config.attention_config,
                             config.hopfield_config,
+                            use_gradient_checkpointing=self.use_gradient_checkpointing,
+                            enable_amp=self.enable_amp,
                             **factory_kwargs,
                         ),
                     ]
@@ -136,6 +184,15 @@ class EnergyTransformer(nn.Module):
         )
 
         self._init_weights()
+
+    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+        """Enable or disable gradient checkpointing for all blocks."""
+        self.use_gradient_checkpointing = enable
+        for block_pair in self.blocks:
+            block_pair = cast(nn.ModuleList, block_pair)
+            block = block_pair[1]  # block is at index 1, norm at index 0
+            if hasattr(block, "use_gradient_checkpointing"):
+                block.use_gradient_checkpointing = enable  # type: ignore[attr-defined]
 
     def _init_weights(self) -> None:
         """Initialize special parameters."""
@@ -220,7 +277,22 @@ class EnergyTransformer(nn.Module):
             norm, block = block_pair[0], block_pair[1]
             for _t in range(self.config.num_time_steps):
                 g = norm(x)
-                grad, energy = torch.func.grad_and_value(block)(g, attn_mask)
+                # Use checkpointed forward if available and enabled
+                if (
+                    hasattr(block, "checkpointed_forward")
+                    and self.use_gradient_checkpointing
+                ):
+
+                    def energy_fn(x: Tensor, _block=block) -> Tensor:
+                        return cast(Tensor, _block.checkpointed_forward(x, attn_mask))  # type: ignore[attr-defined]
+
+                    grad, energy = torch.func.grad_and_value(energy_fn)(g)
+                else:
+
+                    def energy_fn(x: Tensor, _block=block) -> Tensor:
+                        return cast(Tensor, _block.forward(x, attn_mask))
+
+                    grad, energy = torch.func.grad_and_value(energy_fn)(g)
 
                 # Update with gradient
                 x = x - alpha * grad
@@ -265,6 +337,7 @@ class EnergyTransformer(nn.Module):
         alpha: float = 1.0,
         return_energy: bool = False,
         use_cls: bool = False,
+        use_amp: bool = False,
     ) -> Tensor | tuple[Tensor, list[Tensor]]:
         """
         Args:
@@ -274,37 +347,55 @@ class EnergyTransformer(nn.Module):
             alpha: Step size for gradient dynamics
             return_energy: Return energy values
             use_cls: Use class token for output
+            use_amp: Enable automatic mixed precision
 
         Returns:
             Reconstructed patches or (patches, energies)
+
+        Mixed Precision Training:
+            model = EnergyTransformer(config, enable_amp=True)
+            scaler = torch.cuda.amp.GradScaler()
+
+            with torch.cuda.amp.autocast():
+                output = model(inputs, use_amp=True)
+                loss = criterion(output, target)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         """
         batch_size = x.shape[0]
 
-        # Patch embedding (includes projection)
-        x = self.patch_embed(x)
+        # Determine device type for autocast
+        device_type = "cuda" if x.is_cuda else "cpu"
+        amp_enabled = use_amp or self.enable_amp
 
-        # Apply mask if provided
-        if mask is not None:
-            batch_idx, mask_idx = mask
-            # Match original implementation mask indexing
-            x[batch_idx, mask_idx] = self.mask_token.to(dtype=x.dtype)
+        with torch.autocast(device_type=device_type, enabled=amp_enabled):
+            # Patch embedding (includes projection)
+            x = self.patch_embed(x)
 
-        # Add cls token and positional encoding
-        # Convert all to same dtype at once for efficiency
-        target_dtype = x.dtype
-        cls_tokens = self.cls_token.repeat(batch_size, 1, 1).to(dtype=target_dtype)
-        pos_embed_cast = self.pos_embed.to(dtype=target_dtype)
-        x = torch.cat([cls_tokens, x], dim=1)
-        x = x + pos_embed_cast
+            # Apply mask if provided
+            if mask is not None:
+                batch_idx, mask_idx = mask
+                # Match original implementation mask indexing
+                x[batch_idx, mask_idx] = self.mask_token.to(dtype=x.dtype)
 
-        # Evolve through gradient dynamics
-        x, energies = self.evolve(
-            x, alpha, attn_mask=attn_mask, return_energy=return_energy
-        )
+            # Add cls token and positional encoding
+            # Convert all to same dtype at once for efficiency
+            target_dtype = x.dtype
+            cls_tokens = self.cls_token.repeat(batch_size, 1, 1).to(dtype=target_dtype)
+            pos_embed_cast = self.pos_embed.to(dtype=target_dtype)
+            x = torch.cat([cls_tokens, x], dim=1)
+            x = x + pos_embed_cast
 
-        # Output projection
-        x = self.output_proj(x)
-        yh = x[:, :1] if use_cls else x[:, 1:]
+            # Evolve through gradient dynamics
+            x, energies = self.evolve(
+                x, alpha, attn_mask=attn_mask, return_energy=return_energy
+            )
+
+            # Output projection
+            x = self.output_proj(x)
+            yh = x[:, :1] if use_cls else x[:, 1:]
 
         if return_energy and energies is not None:
             return yh, energies
@@ -317,11 +408,13 @@ class GraphEnergyBlock(nn.Module):
     def __init__(
         self,
         config: EnergyBlockConfig,
+        use_gradient_checkpointing: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.config = config
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Attention with graph support
         attn_config = EnergyAttentionConfig(
@@ -359,11 +452,30 @@ class GraphEnergyBlock(nn.Module):
         """
 
         def energy_fn(x: Tensor) -> Tensor:
-            attn_energy = self.attention(x, adjacency, attention_mask)
-            hopfield_energy = self.hopfield(x)
-            return attn_energy + hopfield_energy
+            if self.training and self.use_gradient_checkpointing:
+                result = checkpoint(
+                    self._energy_impl,
+                    x,
+                    adjacency,
+                    attention_mask,
+                    use_reentrant=True,
+                    preserve_rng_state=False,
+                )
+                return cast(Tensor, result)
+            return self._energy_impl(x, adjacency, attention_mask)
 
         return torch.func.grad_and_value(energy_fn)(x)
+
+    def _energy_impl(
+        self,
+        x: Tensor,
+        adjacency: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Implementation of energy computation."""
+        attn_energy = self.attention(x, adjacency, attention_mask)
+        hopfield_energy = self.hopfield(x)
+        return attn_energy + hopfield_energy
 
 
 class GraphEnergyTransformer(nn.Module):
@@ -373,6 +485,7 @@ class GraphEnergyTransformer(nn.Module):
         self,
         config: EnergyTransformerConfig,
         compute_correlation: bool = True,
+        use_gradient_checkpointing: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
@@ -380,6 +493,7 @@ class GraphEnergyTransformer(nn.Module):
         super().__init__()
         self.config = config
         self.compute_correlation = compute_correlation
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Node encoder
         input_dim = config.input_dim or config.patch_dim
@@ -432,7 +546,12 @@ class GraphEnergyTransformer(nn.Module):
                 EnergyLayerNorm(config.embed_dim, eps=config.norm_eps, **factory_kwargs)
             )
             self.blocks.append(
-                GraphEnergyBlock(block_config, device=device, dtype=dtype)
+                GraphEnergyBlock(
+                    block_config,
+                    use_gradient_checkpointing=self.use_gradient_checkpointing,
+                    device=device,
+                    dtype=dtype,
+                )
             )
 
         # Output decoder
@@ -440,6 +559,15 @@ class GraphEnergyTransformer(nn.Module):
         self.decoder = nn.Linear(config.embed_dim, config.out_dim, **factory_kwargs)
 
         self._init_weights()
+
+    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+        """Enable or disable gradient checkpointing for all blocks."""
+        self.use_gradient_checkpointing = enable
+        for block in self.blocks:
+            if hasattr(block, "use_gradient_checkpointing"):
+                block.use_gradient_checkpointing = enable  # type: ignore[attr-defined]
+            if hasattr(block, "enable_amp") and hasattr(self, "enable_amp"):
+                block.enable_amp = getattr(self, "enable_amp", False)  # type: ignore[attr-defined]
 
     def _init_weights(self) -> None:
         nn.init.normal_(self.cls_token, std=0.02)
@@ -649,3 +777,559 @@ class GraphEnergyTransformer(nn.Module):
         model = cls(config, **kwargs)
         model.load_state_dict(checkpoint["model"])
         return model
+
+
+class METBlock(nn.Module):
+    """Multimodal Energy Transformer block.
+
+    Implements multimodal energy-based transformer: combines energy-based attention
+    and cross-modal Hopfield memory for multimodal associative processing.
+
+    Follows the same pattern as EnergyTransformerBlock but handles multiple modalities.
+    """
+
+    def __init__(
+        self,
+        modality_dims: dict[str, int],
+        attention_config: dict,
+        hopfield_config: dict,
+        use_gradient_checkpointing: bool = False,
+        enable_amp: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize MET block following Algorithm 1 specification.
+
+        Args:
+            modality_dims: Dict mapping modality names to feature dimensions
+            attention_config: Configuration for multimodal attention
+            hopfield_config: Configuration for cross-modal Hopfield memory
+            use_gradient_checkpointing: Enable gradient checkpointing
+            enable_amp: Enable automatic mixed precision
+            device: Device for parameters
+            dtype: Data type for parameters
+        """
+        if not modality_dims:
+            raise ValueError("modality_dims cannot be empty")
+        if not all(isinstance(d, int) and d > 0 for d in modality_dims.values()):
+            raise ValueError("All modality dimensions must be positive")
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.modality_dims = modality_dims
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.enable_amp = enable_amp
+
+        # Layer normalization per modality (Algorithm 1, Step 1)
+        self.norms = nn.ModuleDict(
+            {
+                modality: nn.LayerNorm(dim, **factory_kwargs)
+                for modality, dim in modality_dims.items()
+            }
+        )
+
+        # Import multimodal modules
+        from .attention import MultimodalEnergyAttention
+        from .hopfield import CrossModalHopfield
+
+        # Multimodal attention (Algorithm 1, Steps 2-3)
+        modality_configs = {
+            modality: {
+                "embed_dim": dim,
+                "compression_dim": attention_config.get("compression_dims", {}).get(
+                    modality, 100
+                ),
+                "num_heads": attention_config.get("num_heads", 8),
+                "qk_dim": attention_config.get("qk_dim", 64),
+                "basis_type": attention_config.get("basis_type", "rectangular"),
+                "regularization": attention_config.get("regularization", 0.01),
+            }
+            for modality, dim in modality_dims.items()
+        }
+
+        self.attention = MultimodalEnergyAttention(
+            modality_configs=modality_configs,
+            cross_modal_pairs=None,  # All pairs
+            num_integration_points=attention_config.get("integration_points", 50),
+            **factory_kwargs,
+        )
+
+        # Cross-modal Hopfield memory (Algorithm 1, Step 4)
+        num_prototypes_raw = hopfield_config.get("num_prototypes", 256)
+        if isinstance(num_prototypes_raw, int):
+            # Use same value for all modalities
+            num_prototypes = {m: num_prototypes_raw for m in modality_dims}
+        elif isinstance(num_prototypes_raw, dict):
+            # If dict provided, use values for matching modalities, default for others
+            default_value = 256
+            # Try to get a default from the dict values
+            if num_prototypes_raw:
+                default_value = next(iter(num_prototypes_raw.values()))
+            num_prototypes = {
+                m: num_prototypes_raw.get(m, default_value) for m in modality_dims
+            }
+        else:
+            num_prototypes = {m: 256 for m in modality_dims}
+
+        self.hopfield = CrossModalHopfield(
+            modality_dims=modality_dims,
+            num_prototypes=num_prototypes,
+            cross_weight=hopfield_config.get("cross_modal_weight", 0.3),
+            temporal_window=hopfield_config.get("temporal_window", 3),
+            activation_type=hopfield_config.get("activation", "softplus"),
+            **factory_kwargs,
+        )
+
+    def energy(self, features: dict[str, Tensor]) -> Tensor:
+        """Compute energy following Equation (2): E = E^cross + Σ_m [E^intra_m + E^HN_m].
+
+        Args:
+            features: Dict of features per modality (will be normalized internally)
+
+        Returns:
+            Total energy (scalar)
+        """
+        # Validate inputs
+        if not isinstance(features, dict):
+            raise ValueError("Features must be a dictionary")
+
+        missing = set(self.modality_dims) - set(features)
+        if missing:
+            raise ValueError(f"Missing required modality: {missing}")
+
+        # Check dimensions and batch consistency
+        batch_sizes = []
+        for modality, tensor in features.items():
+            if modality in self.modality_dims:
+                expected_dim = self.modality_dims[modality]
+                if tensor.shape[-1] != expected_dim:
+                    raise ValueError(
+                        f"Expected dimension {expected_dim} for modality '{modality}', "
+                        f"got {tensor.shape[-1]}"
+                    )
+                batch_sizes.append(tensor.shape[0])
+
+        if not all(bs == batch_sizes[0] for bs in batch_sizes):
+            raise ValueError("Batch size mismatch between modalities")
+
+        # Apply layer normalization (Algorithm 1, Step 1)
+        normalized = {
+            modality: self.norms[modality](tensor)
+            for modality, tensor in features.items()
+        }
+
+        # Compute energy with optional checkpointing
+        if self.training and self.use_gradient_checkpointing:
+            result = checkpoint(self._compute_energy, normalized, use_reentrant=False)
+            return cast(Tensor, result)
+        result = self._compute_energy(normalized)
+        return cast(Tensor, result)
+
+    def _compute_energy(self, normalized_features: dict[str, Tensor]) -> Tensor:
+        """Compute energy from normalized features."""
+        device_type = (
+            "cuda" if next(iter(normalized_features.values())).is_cuda else "cpu"
+        )
+
+        with torch.autocast(device_type=device_type, enabled=self.enable_amp):
+            # Multimodal attention energies (Steps 2-3)
+            attention_energies = self.attention(
+                normalized_features, return_breakdown=True
+            )
+
+            # Cross-modal Hopfield energy (Step 4)
+            hopfield_energy = self.hopfield(normalized_features)
+
+        # Sum components in fp32 for stability (Step 5)
+        with torch.autocast(device_type=device_type, enabled=False):
+            device = next(iter(normalized_features.values())).device
+            total = torch.tensor(0.0, device=device, dtype=torch.float32)
+
+            # Add attention energies
+            if isinstance(attention_energies, dict):
+                for energy_val in attention_energies.values():
+                    if self.enable_amp and energy_val.dtype != torch.float32:
+                        energy_converted = energy_val.float()
+                        total = total + energy_converted
+                    else:
+                        total = total + energy_val
+            else:
+                if self.enable_amp and attention_energies.dtype != torch.float32:
+                    attention_energies = attention_energies.float()
+                total = total + attention_energies
+
+            # Add Hopfield energy
+            if isinstance(hopfield_energy, dict):
+                for energy_val in hopfield_energy.values():
+                    if self.enable_amp and energy_val.dtype != torch.float32:
+                        energy_converted = energy_val.float()
+                        total = total + energy_converted
+                    else:
+                        total = total + energy_val
+            else:
+                if self.enable_amp and hopfield_energy.dtype != torch.float32:
+                    hopfield_energy = hopfield_energy.float()
+                total = total + hopfield_energy
+
+        return total
+
+    def forward(self, features: dict[str, Tensor]) -> Tensor:
+        """Forward pass returns energy value.
+
+        Args:
+            features: Dict of modality features
+
+        Returns:
+            Energy value (scalar)
+        """
+        return self.energy(features)
+
+    def extra_repr(self) -> str:
+        """String representation of module configuration."""
+        return f"modalities={list(self.modality_dims.keys())}"
+
+
+class MultimodalEnergyTransformer(nn.Module):
+    """Multimodal Energy Transformer for multiple modality processing.
+
+    Processes multiple modalities through energy minimization like EnergyTransformer,
+    but handles heterogeneous inputs through the MET architecture.
+    """
+
+    def __init__(
+        self,
+        config,  # METConfig
+        use_gradient_checkpointing: bool = False,
+        enable_amp: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Initialize MultimodalEnergyTransformer.
+
+        Args:
+            config: METConfig with model specification
+            use_gradient_checkpointing: Enable gradient checkpointing
+            enable_amp: Enable automatic mixed precision
+            device: Device for parameters
+            dtype: Data type for parameters
+        """
+        if not config.modality_configs:
+            raise ValueError("modality_configs cannot be empty")
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+
+        self.config = config
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.enable_amp = enable_amp
+
+        # Extract modality dimensions after projection
+        self.modality_dims = {
+            modality: config.embed_dim for modality in config.modality_configs
+        }
+
+        # Input projections per modality
+        self.input_projs = nn.ModuleDict(
+            {
+                modality: nn.Linear(
+                    cfg["input_dim"], config.embed_dim, **factory_kwargs
+                )
+                for modality, cfg in config.modality_configs.items()
+            }
+        )
+
+        # Stack of MET blocks
+        self.blocks = nn.ModuleList()
+        self.block_norms = nn.ModuleList()  # Pre-block norms like EnergyTransformer
+
+        for _ in range(config.num_blocks):
+            # Pre-block norms per modality
+            self.block_norms.append(
+                nn.ModuleDict(
+                    {
+                        modality: nn.LayerNorm(config.embed_dim, **factory_kwargs)
+                        for modality in config.modality_configs
+                    }
+                )
+            )
+
+            # MET block
+            attention_config = {
+                "num_heads": config.num_heads,
+                "compression_dims": config.compression_dims or {},
+                "basis_type": "rectangular",
+                "regularization": 0.01,
+                "integration_points": config.integration_points,
+            }
+
+            hopfield_config = {
+                "num_prototypes": config.num_prototypes,
+                "activation": config.hopfield_activation,
+                "cross_modal_weight": config.cross_modal_weight,
+                "temporal_window": config.temporal_window,
+            }
+
+            self.blocks.append(
+                METBlock(
+                    modality_dims=self.modality_dims,
+                    attention_config=attention_config,
+                    hopfield_config=hopfield_config,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    enable_amp=enable_amp,
+                    **factory_kwargs,
+                )
+            )
+
+        # Output layer norms
+        self.output_norms = nn.ModuleDict(
+            {
+                modality: nn.LayerNorm(config.embed_dim, **factory_kwargs)
+                for modality in config.modality_configs
+            }
+        )
+
+        # Output projections
+        self.output_projs = nn.ModuleDict(
+            {
+                modality: nn.Linear(
+                    config.embed_dim,
+                    cfg.get("output_dim", cfg["input_dim"]),
+                    **factory_kwargs,
+                )
+                for modality, cfg in config.modality_configs.items()
+            }
+        )
+
+    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+        """Enable or disable gradient checkpointing for all blocks."""
+        self.use_gradient_checkpointing = enable
+        for block in self.blocks:
+            block.use_gradient_checkpointing = enable  # type: ignore[attr-defined]
+
+    def no_weight_decay(self) -> list[str]:
+        """List of parameters to exclude from weight decay."""
+        no_decay = []
+        for name, _ in self.named_parameters():
+            if "norm" in name or "bias" in name:
+                no_decay.append(name)
+        return no_decay
+
+    def evolve(
+        self,
+        features: dict[str, Tensor],
+        step_size: float | None = None,
+        return_energy: bool = False,
+    ) -> tuple[dict[str, Tensor], list[Tensor] | None]:
+        """Evolve features through gradient dynamics.
+
+        Args:
+            features: Input features per modality
+            step_size: Step size η for gradient descent (uses config.step_size if None)
+            return_energy: Whether to return energy values
+
+        Returns:
+            Evolved features and optional energy trajectory
+        """
+        # Use config step_size if not provided
+        if step_size is None:
+            step_size = getattr(self.config, "step_size", 0.001)
+
+        energies = [] if return_energy else None
+        x = {modality: tensor.clone() for modality, tensor in features.items()}
+
+        # Evolve through blocks
+        for _i, (norms, block) in enumerate(
+            zip(self.block_norms, self.blocks, strict=False)
+        ):
+            for _ in range(self.config.num_time_steps):
+                # Normalize per modality
+                g = {
+                    modality: cast(nn.ModuleDict, norms)[modality](x[modality])
+                    for modality in x
+                }
+
+                # Compute gradient and energy
+                def energy_fn(features: dict[str, Tensor], _block=block) -> Tensor:
+                    return _block.energy(features)  # type: ignore[no-any-return]
+
+                grad, energy = torch.func.grad_and_value(energy_fn)(g)
+
+                # Update with gradient descent: x = x - η∇E
+                for modality, tensor in x.items():
+                    x[modality] = tensor - step_size * grad[modality]
+
+                if return_energy and energies is not None:
+                    energies.append(energy)
+
+        return x, energies
+
+    def _validate_input_completeness(self, inputs: dict[str, Tensor]) -> None:
+        """Validate that all required modalities are provided."""
+        expected = set(self.config.modality_configs.keys())
+        provided = set(inputs.keys()) - {"pos_encodings"}
+        missing = expected - provided
+        if missing:
+            raise ValueError(f"Missing required modality: {missing}")
+
+    def _validate_input_dimensions(self, inputs: dict[str, Tensor]) -> None:
+        """Validate input dimensions and consistency."""
+        batch_sizes = []
+        seq_lengths = []
+        for modality, tensor in inputs.items():
+            if modality == "pos_encodings":
+                continue
+            if modality in self.config.modality_configs:
+                expected_dim = self.config.modality_configs[modality]["input_dim"]
+                if tensor.shape[-1] != expected_dim:
+                    raise ValueError(
+                        f"Expected dimension {expected_dim} for modality '{modality}', "
+                        f"got {tensor.shape[-1]}"
+                    )
+                batch_sizes.append(tensor.shape[0])
+                seq_lengths.append(tensor.shape[1])
+
+        if batch_sizes and not all(bs == batch_sizes[0] for bs in batch_sizes):
+            raise ValueError("Batch size mismatch between modalities")
+        if seq_lengths and not all(sl == seq_lengths[0] for sl in seq_lengths):
+            raise ValueError("Sequence length mismatch between modalities")
+
+    def _add_positional_encodings(
+        self, projected: dict[str, Tensor], inputs: dict[str, Tensor]
+    ) -> None:
+        """Add positional encodings if provided."""
+        if "pos_encodings" not in inputs:
+            return
+
+        pos_encodings_raw = inputs["pos_encodings"]
+        pos_encodings = cast(dict[str, Tensor], pos_encodings_raw)
+        for modality, tensor in projected.items():
+            if isinstance(pos_encodings, dict) and modality in pos_encodings:
+                projected[modality] = tensor + pos_encodings[modality]
+
+    def project_inputs(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Project inputs to embedding dimension.
+
+        Args:
+            inputs: Dict of raw inputs per modality
+
+        Returns:
+            Dict of projected features
+        """
+        # Validate inputs
+        self._validate_input_completeness(inputs)
+        self._validate_input_dimensions(inputs)
+
+        # Project inputs
+        projected = {
+            modality: self.input_projs[modality](tensor)
+            for modality, tensor in inputs.items()
+            if modality != "pos_encodings"
+        }
+
+        # Add positional encodings if provided
+        self._add_positional_encodings(projected, inputs)
+        return projected
+
+    def forward(
+        self,
+        inputs: dict[str, Tensor],
+        step_size: float | None = None,
+        return_energies: bool = False,
+        use_amp: bool = False,
+    ) -> dict[str, Tensor] | tuple[dict[str, Tensor], list[Tensor]]:
+        """Forward pass through MET.
+
+        Args:
+            inputs: Dict of inputs per modality
+            step_size: Step size η for gradient descent (uses config.step_size if None)
+            return_energies: Whether to return energy trajectory
+            use_amp: Enable automatic mixed precision
+
+        Returns:
+            Output features dict, or (outputs, energies) if return_energies=True
+        """
+        device_type = "cuda" if next(iter(inputs.values())).is_cuda else "cpu"
+        amp_enabled = use_amp or self.enable_amp
+
+        with torch.autocast(device_type=device_type, enabled=amp_enabled):
+            # Project inputs
+            x = self.project_inputs(inputs)
+
+            # Evolve through gradient dynamics
+            x, energies = self.evolve(
+                x, step_size=step_size, return_energy=return_energies
+            )
+
+            # Apply output norms and projections
+            outputs = {}
+            for modality in x:
+                # Apply output norm
+                if modality in self.output_norms:
+                    normed = self.output_norms[modality](x[modality])
+                else:
+                    normed = x[modality]
+
+                # Apply output projection if exists
+                if modality in self.output_projs:
+                    outputs[modality] = self.output_projs[modality](normed)
+                else:
+                    outputs[modality] = normed
+
+        if return_energies and energies is not None:
+            return cast(tuple[dict[str, Tensor], list[Tensor]], (outputs, energies))
+        return cast(dict[str, Tensor], outputs)
+
+    def visualize(
+        self,
+        inputs: dict[str, Tensor],
+        step_size: float | None = None,
+    ) -> tuple[list[Tensor], dict[str, list[Tensor]]]:
+        """Visualize energy evolution during forward pass.
+
+        Args:
+            inputs: Input features dict
+            step_size: Step size η for gradient descent (uses config.step_size if None)
+
+        Returns:
+            Tuple of (energies, embeddings_dict)
+        """
+        # Use config step_size if not provided
+        if step_size is None:
+            step_size = getattr(self.config, "step_size", 0.001)
+
+        # Project inputs
+        x = self.project_inputs(inputs)
+
+        energies = []
+        embeddings_dict = {modality: [x[modality].clone()] for modality in x}
+
+        # Evolve through blocks and track states
+        for norms, block in zip(self.block_norms, self.blocks, strict=False):
+            for _ in range(self.config.num_time_steps):
+                # Normalize
+                g = {
+                    modality: cast(nn.ModuleDict, norms)[modality](x[modality])
+                    for modality in x
+                }
+
+                # Compute gradient and energy
+                def energy_fn(features: dict[str, Tensor], _block=block) -> Tensor:
+                    return _block.energy(features)  # type: ignore[no-any-return]
+
+                grad, energy = torch.func.grad_and_value(energy_fn)(g)
+
+                # Update with gradient descent: x = x - η∇E
+                for modality, tensor in x.items():
+                    x[modality] = tensor - step_size * grad[modality]
+                    embeddings_dict[modality].append(x[modality].clone())
+
+                energies.append(energy)
+
+        return energies, embeddings_dict
+
+    def extra_repr(self) -> str:
+        """String representation of module configuration."""
+        return (
+            f"num_blocks={len(self.blocks)}, modalities={list(self.input_projs.keys())}"
+        )
