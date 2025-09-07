@@ -6,11 +6,10 @@ specialized modules for multimodal and continuous memory systems.
 
 Classes:
     EnergyBlockConfig: Configuration for energy transformer blocks
-    EnergyAttentionConfig: Configuration for energy-based attention layers  
+    EnergyAttentionConfig: Configuration for energy-based attention layers
     HopfieldConfig: Configuration for Hopfield memory layers
     EnergyTransformerConfig: Main configuration for energy transformers
     BasisConfig: Configuration for basis functions in continuous memory
-    CCCPConfig: Configuration for CCCP optimization algorithm
     ContinuousHopfieldConfig: Configuration for continuous Hopfield networks
     METConfig: Configuration for Multimodal Energy Transformers
 """
@@ -32,7 +31,7 @@ class EnergyBlockConfig:
     Attributes:
         embed_dim: Embedding dimension
         num_heads: Number of attention heads
-        qk_dim: Query/Key dimension per head  
+        qk_dim: Query/Key dimension per head
         mlp_ratio: MLP hidden dimension ratio
         attn_bias: Whether to use bias in attention projections
         mlp_bias: Whether to use bias in MLP layers
@@ -286,39 +285,6 @@ class BasisConfig:
 
 
 @dataclass(frozen=True)
-class CCCPConfig:
-    """Configuration for CCCP optimization.
-
-    Args:
-        max_iterations: Maximum number of CCCP iterations
-        tolerance: Convergence tolerance for point difference
-        step_size: Step size for damped updates (0 < alpha <= 1)
-        momentum: Momentum coefficient for acceleration
-        track_trajectory: Whether to record optimization path
-        use_line_search: Whether to use backtracking line search
-    """
-
-    max_iterations: int = 100
-    tolerance: float = 1e-6
-    step_size: float = 1.0
-    momentum: float = 0.0
-    track_trajectory: bool = False
-    use_line_search: bool = False
-
-    def __post_init__(self) -> None:
-        if self.max_iterations <= 0:
-            raise ValueError(
-                f"max_iterations must be positive, got {self.max_iterations}"
-            )
-        if self.tolerance <= 0:
-            raise ValueError(f"tolerance must be positive, got {self.tolerance}")
-        if not 0 < self.step_size <= 1:
-            raise ValueError(f"step_size must be in (0, 1], got {self.step_size}")
-        if not 0 <= self.momentum < 1:
-            raise ValueError(f"momentum must be in [0, 1), got {self.momentum}")
-
-
-@dataclass(frozen=True)
 class ContinuousHopfieldConfig:
     """Configuration for continuous Hopfield networks.
 
@@ -327,7 +293,7 @@ class ContinuousHopfieldConfig:
         beta: Inverse temperature parameter
         regularization: Ridge regression regularization
         integration_points: Number of points for numerical integration
-        cccp_config: Configuration for CCCP optimizer
+        num_iterations: Number of iterations for updates (default: 3)
         use_analytical_update: Whether to use analytical CCCP solution
         memory_compression: Target compression ratio N/L (None = use basis_config.num_basis)
     """
@@ -336,7 +302,7 @@ class ContinuousHopfieldConfig:
     beta: float = 1.0
     regularization: float = 0.5
     integration_points: int = 500
-    cccp_config: CCCPConfig = field(default_factory=CCCPConfig)
+    num_iterations: int = 3
     use_analytical_update: bool = True
     memory_compression: float | None = None
 

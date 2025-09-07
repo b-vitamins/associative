@@ -5,7 +5,7 @@ architectures, including modern Hopfield networks, energy transformers, and
 continuous memory systems. Key components include:
 
 - Attention mechanisms with energy-based dynamics
-- Basis functions for continuous memory representations  
+- Basis functions for continuous memory representations
 - Configuration classes for model parameterization
 - Continuous memory modules with function approximation
 - Hopfield networks with modern architectures
@@ -31,14 +31,18 @@ from .basis import (
 )
 from .config import (
     BasisConfig,
-    CCCPConfig,
     ContinuousHopfieldConfig,
     EnergyAttentionConfig,
     EnergyTransformerConfig,
     HopfieldConfig,
     METConfig,
 )
-from .continuous import ContinuousAttention, ContinuousHopfield, ContinuousMemory
+from .continuous import (
+    ContinuousAttention,
+    ContinuousHopfield,
+    ContinuousHopfieldEnergy,
+    ContinuousMemory,
+)
 from .hopfield import CrossModalHopfield, Hopfield
 from .integrator import (
     AdaptiveIntegrator,
@@ -50,13 +54,6 @@ from .integrator import (
     create_integrator,
 )
 from .normalization import EnergyLayerNorm
-from .optimization import (
-    CCCPOptimizer,
-    ContinuousHopfieldEnergy,
-    EnergyFunction,
-    OptimizationResult,
-    QuadraticConvexSolver,
-)
 from .transformer import (
     EnergyTransformer,
     EnergyTransformerBlock,
@@ -75,8 +72,6 @@ __all__ = [
     "BasisConfig",
     # Basis functions
     "BasisFunction",
-    "CCCPConfig",
-    "CCCPOptimizer",
     # Continuous modules
     "ContinuousAttention",
     # Basis and compression
@@ -90,7 +85,6 @@ __all__ = [
     # Attention modules
     "EnergyAttention",
     "EnergyAttentionConfig",
-    "EnergyFunction",
     # Normalization
     "EnergyLayerNorm",
     # Transformer modules
@@ -113,10 +107,8 @@ __all__ = [
     "MonteCarloIntegrator",
     "MultimodalEnergyAttention",
     "MultimodalEnergyTransformer",
-    "OptimizationResult",
     "PatchEmbed",
     "PolynomialBasis",
-    "QuadraticConvexSolver",
     "RectangularBasis",
     "SimpsonIntegrator",
     "TrapezoidalIntegrator",
