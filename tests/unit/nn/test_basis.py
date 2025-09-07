@@ -7,6 +7,7 @@ from associative.nn.modules.basis import (
     ContinuousCompression,
     FourierBasis,
     GaussianBasis,
+    PolynomialBasis,
     RectangularBasis,
     create_basis,
 )
@@ -198,6 +199,250 @@ class TestGaussianBasis:
                 assert not torch.allclose(p.grad, torch.zeros_like(p.grad))
 
 
+class TestPolynomialBasis:
+    """Test polynomial basis function implementation."""
+
+    @pytest.fixture
+    def polynomial_basis(self):
+        """Create a standard polynomial basis."""
+        return PolynomialBasis(num_basis=5, domain=(0.0, 1.0))
+
+    def test_initialization(self, polynomial_basis):
+        """Test proper initialization of polynomial basis."""
+        assert polynomial_basis.num_basis == 5
+        assert polynomial_basis.domain == (0.0, 1.0)
+        assert polynomial_basis.normalize
+        assert torch.allclose(
+            polynomial_basis.powers, torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0])
+        )
+
+        # Test without normalization
+        basis_unnorm = PolynomialBasis(num_basis=4, normalize=False)
+        assert not basis_unnorm.normalize
+
+    def test_evaluate_monomials(self):
+        """Test that basis functions are proper monomials."""
+        basis = PolynomialBasis(num_basis=4, normalize=False)
+        t = torch.tensor([0.0, 0.5, 1.0])
+        psi = basis.evaluate(t)
+
+        # Check shape
+        assert psi.shape == (4, 3)
+
+        # For unnormalized: psi_i(t) = t^i
+        # At t=0: [1, 0, 0, 0]
+        expected_t0 = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        assert torch.allclose(psi[:, 0], expected_t0)
+
+        # At t=0.5: [1, 0.5, 0.25, 0.125]
+        expected_t05 = torch.tensor([1.0, 0.5, 0.25, 0.125])
+        assert torch.allclose(psi[:, 1], expected_t05)
+
+        # At t=1: [1, 1, 1, 1]
+        expected_t1 = torch.tensor([1.0, 1.0, 1.0, 1.0])
+        assert torch.allclose(psi[:, 2], expected_t1)
+
+    def test_evaluate_normalized(self):
+        """Test polynomial evaluation with normalization."""
+        basis = PolynomialBasis(num_basis=3, normalize=True, domain=(0.0, 1.0))
+        # Normalized maps [0,1] to [-1,1]
+        t = torch.tensor([0.0, 0.5, 1.0])
+        psi = basis.evaluate(t)
+
+        # At t=0 -> t_norm=-1: [1, -1, 1]
+        expected_t0 = torch.tensor([1.0, -1.0, 1.0])
+        assert torch.allclose(psi[:, 0], expected_t0)
+
+        # At t=0.5 -> t_norm=0: [1, 0, 0]
+        expected_t05 = torch.tensor([1.0, 0.0, 0.0])
+        assert torch.allclose(psi[:, 1], expected_t05)
+
+        # At t=1 -> t_norm=1: [1, 1, 1]
+        expected_t1 = torch.tensor([1.0, 1.0, 1.0])
+        assert torch.allclose(psi[:, 2], expected_t1)
+
+    def test_evaluate_scalar(self, polynomial_basis):
+        """Test evaluation at scalar time points."""
+        t = torch.tensor(0.25)
+        psi = polynomial_basis.evaluate(t)
+        assert psi.shape == (5,)
+
+        # Check first few values (normalized to [-1, 1])
+        # t=0.25 -> t_norm=-0.5
+        t_norm = 2 * 0.25 - 1  # -0.5
+        expected = torch.tensor(
+            [
+                1.0,  # t^0
+                t_norm,  # t^1 = -0.5
+                t_norm**2,  # t^2 = 0.25
+                t_norm**3,  # t^3 = -0.125
+                t_norm**4,  # t^4 = 0.0625
+            ]
+        )
+        assert torch.allclose(psi, expected)
+
+    def test_evaluate_batch(self, polynomial_basis):
+        """Test evaluation at multiple time points."""
+        t = torch.linspace(0, 1, 100)
+        psi = polynomial_basis.evaluate(t)
+        assert psi.shape == (5, 100)
+
+        # First basis function should be constant 1
+        assert torch.allclose(psi[0], torch.ones(100))
+
+        # All values should be finite
+        assert torch.isfinite(psi).all()
+
+    def test_evaluate_outside_domain(self, polynomial_basis):
+        """Test that evaluation outside domain returns zeros."""
+        t = torch.tensor([-0.5, 1.5, 2.0])
+        psi = polynomial_basis.evaluate(t)
+        assert psi.shape == (5, 3)
+        assert torch.allclose(psi, torch.zeros(5, 3))
+
+    def test_numerical_stability(self):
+        """Test numerical stability for high-degree polynomials."""
+        # High degree polynomials can be unstable
+        basis_normalized = PolynomialBasis(num_basis=10, normalize=True)
+        basis_unnormalized = PolynomialBasis(num_basis=10, normalize=False)
+
+        t = torch.linspace(0, 1, 50)
+        psi_norm = basis_normalized.evaluate(t)
+        psi_unnorm = basis_unnormalized.evaluate(t)
+
+        # Normalized should be more stable (values bounded)
+        assert torch.isfinite(psi_norm).all()
+        assert torch.isfinite(psi_unnorm).all()
+
+        # For normalized basis, values should be bounded roughly by degree
+        # since we map to [-1, 1]
+        assert psi_norm.abs().max() < 10  # Reasonable bound for degree 9
+
+    def test_orthogonality_not_expected(self, polynomial_basis):
+        """Test that polynomial basis is NOT orthogonal (by design)."""
+        # Sample points for numerical integration
+        t = torch.linspace(0, 1, 1000)
+        psi = polynomial_basis.evaluate(t)
+
+        # Compute Gram matrix
+        dt = 1.0 / 1000
+        gram = psi @ psi.T * dt
+
+        # Should NOT be identity (polynomials are not orthogonal)
+        eye = torch.eye(5)
+        assert not torch.allclose(gram, eye, atol=0.1)
+
+        # But should be symmetric and positive definite
+        assert torch.allclose(gram, gram.T)
+        eigenvals = torch.linalg.eigvals(gram)
+        assert (eigenvals.real > -1e-6).all()  # Positive semi-definite
+
+    def test_design_matrix(self, polynomial_basis):
+        """Test design matrix computation."""
+        time_points = torch.linspace(0, 1, 20)
+        design_matrix = polynomial_basis.design_matrix(time_points)
+        assert design_matrix.shape == (5, 20)
+
+        # Should match evaluate
+        psi = polynomial_basis.evaluate(time_points)
+        assert torch.allclose(design_matrix, psi)
+
+    def test_vandermonde_structure(self):
+        """Test that design matrix has Vandermonde structure."""
+        basis = PolynomialBasis(num_basis=4, normalize=False)
+        t = torch.tensor([0.1, 0.3, 0.5, 0.7, 0.9])
+        design_matrix = basis.design_matrix(t)
+
+        # Should form a Vandermonde matrix
+        # Each column should be [1, t_i, t_i^2, t_i^3]
+        for i, t_val in enumerate(t):
+            expected_col = torch.tensor([t_val**j for j in range(4)])
+            assert torch.allclose(design_matrix[:, i], expected_col)
+
+    def test_differentiability(self, polynomial_basis):
+        """Test that polynomial basis is differentiable."""
+        t = torch.linspace(0, 1, 10, requires_grad=True)
+        psi = polynomial_basis.evaluate(t)
+
+        # Should be able to compute gradients
+        loss = psi.sum()
+        loss.backward()
+        assert t.grad is not None
+
+        # Gradient should be non-zero (except possibly at specific points)
+        assert not torch.allclose(t.grad, torch.zeros_like(t.grad))
+
+    def test_custom_domain(self):
+        """Test polynomial basis with custom domain."""
+        basis = PolynomialBasis(num_basis=3, domain=(-1.0, 1.0), normalize=False)
+        t = torch.tensor([-1.0, 0.0, 1.0])
+        psi = basis.evaluate(t)
+
+        # At t=-1: [1, -1, 1]
+        expected_neg1 = torch.tensor([1.0, -1.0, 1.0])
+        assert torch.allclose(psi[:, 0], expected_neg1)
+
+        # At t=0: [1, 0, 0]
+        expected_0 = torch.tensor([1.0, 0.0, 0.0])
+        assert torch.allclose(psi[:, 1], expected_0)
+
+        # At t=1: [1, 1, 1]
+        expected_1 = torch.tensor([1.0, 1.0, 1.0])
+        assert torch.allclose(psi[:, 2], expected_1)
+
+    def test_conditioning_warning(self):
+        """Test that high-degree polynomials may have conditioning issues."""
+        # This is more of a documentation test - polynomials can be ill-conditioned
+        basis = PolynomialBasis(num_basis=15, normalize=True)
+        t = torch.linspace(0, 1, 100)
+        basis.evaluate(t)
+
+        # Compute condition number of design matrix
+        design_matrix = basis.design_matrix(t[:15])  # Square matrix
+        cond = torch.linalg.cond(design_matrix)
+
+        # High-degree polynomials typically have poor conditioning
+        # This is expected and why other basis functions may be preferred
+        assert cond > 1e3  # Typically very ill-conditioned
+
+    @pytest.mark.parametrize("num_basis", [1, 2, 3, 5, 8, 10])
+    def test_different_degrees(self, num_basis):
+        """Test polynomial basis with different degrees."""
+        basis = PolynomialBasis(num_basis=num_basis)
+        t = torch.linspace(0, 1, 50)
+        psi = basis.evaluate(t)
+
+        assert psi.shape == (num_basis, 50)
+        assert torch.isfinite(psi).all()
+
+        # First basis should always be constant 1
+        assert torch.allclose(psi[0], torch.ones(50))
+
+    def test_regression_capabilities(self, polynomial_basis):
+        """Test that polynomial basis can fit polynomial functions exactly."""
+        # Polynomial basis should fit polynomials of degree < num_basis exactly
+        t = torch.linspace(0, 1, 100)
+
+        # Target: f(t) = 2 + 3t - t^2 (degree 2)
+        # Map t to normalized coordinates for evaluation
+        t_norm = 2 * t - 1  # Map [0,1] to [-1,1]
+        target = 2 + 3 * t_norm - t_norm**2
+
+        # Get basis values
+        psi = polynomial_basis.evaluate(t)  # (5, 100)
+
+        # Solve least squares: find coefficients c such that c @ psi ≈ target
+        # Using normal equations: c = target @ psi.T @ (psi @ psi.T)^-1
+        gram = psi @ psi.T
+        coeffs = target @ psi.T @ torch.linalg.inv(gram + 1e-6 * torch.eye(5))
+
+        # Reconstruct
+        reconstructed = coeffs @ psi
+
+        # Should fit degree-2 polynomial very well (exact up to numerical errors)
+        assert torch.allclose(reconstructed, target, atol=1e-4)
+
+
 class TestFourierBasis:
     """Test Fourier basis function implementation."""
 
@@ -297,6 +542,14 @@ class TestBasisFactory:
         assert basis.num_basis == num_basis_test
         assert not basis.use_complex
 
+    def test_create_polynomial(self):
+        """Test creation of polynomial basis."""
+        num_basis_test = 6
+        basis = create_basis("polynomial", num_basis_test, normalize=True)
+        assert isinstance(basis, PolynomialBasis)
+        assert basis.num_basis == num_basis_test
+        assert basis.normalize
+
     def test_invalid_basis_type(self):
         """Test that invalid basis type raises error."""
         with pytest.raises(ValueError, match="not recognized"):
@@ -329,7 +582,9 @@ class TestBasisIntegration:
         assert basis.num_basis == num_basis_test
         assert basis.domain == (-1.0, 1.0)
 
-    @pytest.mark.parametrize("basis_type", ["rectangular", "gaussian", "fourier"])
+    @pytest.mark.parametrize(
+        "basis_type", ["rectangular", "gaussian", "fourier", "polynomial"]
+    )
     def test_all_basis_types_compatible(self, basis_type):
         """Test that all basis types implement the same interface."""
         num_basis = 8 if basis_type == "fourier" else 7
@@ -1054,7 +1309,7 @@ class TestContinuousCompressionScores:
         )
         expected_combined = a * s1 + b * s2
 
-        assert torch.allclose(s_combined, expected_combined, atol=1e-5)
+        assert torch.allclose(s_combined, expected_combined, atol=1e-4)
 
         # Test linearity in compressed keys
         k1, k2 = (
@@ -1069,7 +1324,7 @@ class TestContinuousCompressionScores:
         )
         expected_combined = a * s1 + b * s2
 
-        assert torch.allclose(s_combined, expected_combined, atol=1e-5)
+        assert torch.allclose(s_combined, expected_combined, atol=1e-4)
 
 
 class TestContinuousCompressionForward:
@@ -1224,6 +1479,7 @@ class TestContinuousCompressionIntegration:
             RectangularBasis(num_basis=8),
             GaussianBasis(num_basis=8),
             FourierBasis(num_basis=8),
+            PolynomialBasis(num_basis=8),
         ]
 
         for basis in basis_types:

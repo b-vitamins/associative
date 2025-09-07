@@ -432,11 +432,78 @@ class FourierBasis(BasisFunction):
         return result
 
 
+class PolynomialBasis(BasisFunction):
+    """Polynomial basis functions.
+
+    Each basis function is a monomial: psi_i(t) = t^i for i = 0, 1, ..., num_basis-1
+
+    Attributes:
+        powers: Tensor of shape (num_basis,) with powers [0, 1, ..., num_basis-1]
+        normalize: Whether to normalize polynomials for stability
+    """
+
+    def __init__(
+        self,
+        num_basis: int,
+        domain: tuple[float, float] = (0.0, 1.0),
+        normalize: bool = True,
+    ):
+        """Initialize polynomial basis functions.
+
+        Args:
+            num_basis: Number of basis functions (polynomial degree + 1)
+            domain: Domain of the functions
+            normalize: Whether to normalize to [-1, 1] for numerical stability
+        """
+        super().__init__(num_basis, domain)
+        self.normalize = normalize
+        self.register_buffer("powers", torch.arange(num_basis, dtype=torch.float32))
+
+    def evaluate(self, time_points: Tensor) -> Tensor:
+        """Evaluate polynomial basis functions.
+
+        Computes t^i for each power i.
+        """
+        if not isinstance(time_points, torch.Tensor):
+            t = torch.tensor(time_points, dtype=torch.float32)
+        else:
+            t = time_points
+
+        is_scalar = t.dim() == 0
+        if is_scalar:
+            t = t.unsqueeze(0)
+
+        # Normalize to [-1, 1] if requested
+        if self.normalize:
+            domain_start, domain_end = self.domain
+            t_norm = 2 * (t - domain_start) / (domain_end - domain_start) - 1
+        else:
+            t_norm = t
+
+        # Expand dimensions
+        t_expanded = t_norm.unsqueeze(-2)  # (..., 1, num_points)
+        powers_expanded = cast(Tensor, self.powers).unsqueeze(-1)  # (num_basis, 1)
+
+        # Compute t^i for each power
+        result = torch.pow(t_expanded, powers_expanded)
+
+        # Set outside domain to 0
+        domain_start, domain_end = self.domain
+        outside_mask = (t < domain_start) | (t > domain_end)
+        mask = (~outside_mask).float().unsqueeze(-2)
+        result = result * mask
+
+        if is_scalar:
+            result = result.squeeze()
+
+        return result
+
+
 def create_basis(basis_type: str, num_basis: int, **kwargs) -> BasisFunction:
     """Factory function to create basis functions.
 
     Args:
-        basis_type: Type of basis ("rectangular", "gaussian", "fourier")
+        basis_type: Type of basis ("rectangular", "gaussian", "fourier", "polynomial")
         num_basis: Number of basis functions
         **kwargs: Additional arguments passed to the basis constructor
 
@@ -458,6 +525,8 @@ def create_basis(basis_type: str, num_basis: int, **kwargs) -> BasisFunction:
         return GaussianBasis(num_basis, **kwargs)
     if basis_type == "fourier":
         return FourierBasis(num_basis, **kwargs)
+    if basis_type == "polynomial":
+        return PolynomialBasis(num_basis, **kwargs)
     raise ValueError(f"{basis_type} not recognized")
 
 
