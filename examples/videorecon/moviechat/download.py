@@ -4,6 +4,7 @@
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parents[3]))
@@ -22,7 +23,8 @@ def main() -> None:
             "Get your token from: https://huggingface.co/settings/tokens"
         )
 
-    for split in ["train", "test"]:
+    splits: list[Literal["train", "test"]] = ["train", "test"]
+    for split in splits:
         try:
             # Create dataset with download=True (uses default root=None for XDG cache)
             MovieChat1K(

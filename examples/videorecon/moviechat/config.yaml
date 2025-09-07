@@ -1,0 +1,76 @@
+# MovieChat Video Reconstruction Experiment Configuration
+
+# Model configuration
+model:
+  # Embedder configuration
+  embedder:
+    name: "eva_clip_vit_g_14"  # Use the correct registered name
+    num_query_tokens: 32
+    pool_tokens: true  # Average pool over tokens for smoothness
+  
+  # Continuous Hopfield Network configuration
+  chn:
+    beta: 1.0  # Temperature parameter
+    integration_method: "trapezoidal"
+    num_integration_points: 500
+    
+    # Basis function configuration
+    basis:
+      num_basis: 256  # Number of basis functions (N << L for compression)
+      basis_type: "rectangular"  # Will be overridden in experiment
+      domain: [0.0, 1.0]
+      regularization: 1e-3
+    
+    # CCCP optimizer configuration
+    cccp:
+      max_iterations: 50
+      tolerance: 1e-4
+      step_size: 1.0
+      momentum: 0.0
+      use_line_search: false
+      track_trajectory: false
+
+# Data configuration
+data:
+  dataset: "moviechat"
+  batch_size: 1  # Process one video at a time
+  num_workers: 4
+  num_frames: 512  # Number of frames to sample from each video
+  resolution: 224  # Frame resolution (224x224)
+  mask_ratio: 0.5  # Mask 50% of frames for reconstruction
+
+# Experiment configuration
+experiment:
+  # Basis functions to compare
+  basis_types:
+    - "rectangular"
+    - "gaussian"
+    - "fourier"
+    - "polynomial"
+  
+  num_videos: 10  # Number of videos to test
+  embedding_chunk_size: 16  # Process embeddings in chunks to save memory
+  results_dir: "outputs/results"  # Where to save results (gitignored)
+  
+  # Masking strategy (following CHM-Net)
+  use_noise_masking: true  # If true, add noise instead of masking
+  noise_std: 5.0  # Standard deviation for Gaussian noise (CHM-Net default)
+
+# Directories (all under outputs/ which is gitignored)
+checkpoint_dir: outputs/checkpoints/${data.dataset}
+result_dir: outputs/results/${data.dataset}
+visualization_dir: outputs/visualizations/${data.dataset}
+
+# Misc
+seed: 42
+device: "cuda"  # or "cpu"
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/multirun/${data.dataset}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false  # Don't change directory
