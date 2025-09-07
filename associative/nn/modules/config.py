@@ -128,6 +128,9 @@ class EnergyTransformerConfig:
     out_dim: int | None = None
     hopfield_activation_type: str = "relu"  # Activation type for Hopfield layers
 
+    # Mixed precision training
+    enable_amp: bool = False  # Enable automatic mixed precision
+
     # Stochastic gradient descent parameters
     use_noise: bool = False  # Whether to add noise during gradient descent
     noise_std: float = 0.02  # Standard deviation of noise
@@ -325,4 +328,230 @@ class ContinuousHopfieldConfig:
         if self.memory_compression is not None and not 0 < self.memory_compression <= 1:
             raise ValueError(
                 f"memory_compression must be in (0, 1], got {self.memory_compression}"
+            )
+
+
+@dataclass(frozen=True)
+class METConfig(EnergyTransformerConfig):
+    """Configuration for Multimodal Energy Transformer.
+
+    Extends EnergyTransformerConfig with multimodal-specific parameters
+    for continuous compression, cross-modal attention, and gradient flow.
+
+    Args:
+        # Modality specifications
+        modality_configs: Dict mapping modality names to their configs
+        cross_modal_pairs: List of enabled cross-modal attention pairs
+
+        # Compression parameters
+        compression_dims: Dict of compression dimensions M per modality
+        basis_types: Dict of basis function types per modality
+        regularizations: Dict of ridge regression λ per modality
+
+        # Cross-modal parameters
+        cross_modal_weight: λ_cross for cross-modal influence [0,1]
+        temporal_window: Window size for temporal smoothing
+
+        # Hopfield memory
+        num_prototypes: Number of prototypes K per modality
+        hopfield_activation: Activation function for memory energy
+
+        # Integration parameters
+        integrator_method: Numerical integration method
+        integration_points: Number of quadrature points
+
+        # Gradient flow dynamics
+        max_iterations: Maximum iterations per block
+        step_size: Gradient descent step size η
+        time_constant: Dynamics time constant τ
+        convergence_tolerance: Convergence criterion ε
+
+        # Architecture
+        num_blocks: Number of MET blocks
+        share_cross_projections: Whether to share projections across blocks
+
+        # Training
+        track_trajectories: Whether to save evolution trajectories
+        use_stochastic_depth: Whether to use stochastic depth
+        stochastic_depth_rate: Drop rate for stochastic depth
+    """
+
+    # Modality specifications
+    modality_configs: dict[str, dict] | None = None
+    cross_modal_pairs: list[tuple[str, str]] | None = None
+
+    # Compression parameters (defaults for video/audio)
+    compression_dims: dict[str, int] | None = None
+    basis_types: dict[str, str] | None = None
+    regularizations: dict[str, float] | None = None
+
+    # Cross-modal parameters
+    cross_modal_weight: float = 0.3
+    temporal_window: int = 3
+
+    # Hopfield memory
+    num_prototypes: dict[str, int] | int = 256
+    hopfield_activation: str = "softplus"
+
+    # Integration parameters
+    integrator_method: str = "gauss"
+    integration_points: int = 50
+
+    # Gradient flow dynamics
+    max_iterations: int = 20
+    step_size: float = 0.001  # η for gradient descent (optimal for stable convergence)
+    time_constant: float = 1.0
+    convergence_tolerance: float = 1e-4
+
+    # Architecture
+    num_blocks: int = 4
+    share_cross_projections: bool = False
+
+    # Training
+    track_trajectories: bool = False
+    use_stochastic_depth: bool = False
+    stochastic_depth_rate: float = 0.1
+
+    # Mixed precision training
+    enable_amp: bool = False  # Enable automatic mixed precision
+
+    def __post_init__(self) -> None:
+        """Validate and set default MET configurations."""
+        # Call parent post_init
+        super().__post_init__()
+
+        # Set default modality configs if not provided
+        if self.modality_configs is None:
+            object.__setattr__(
+                self,
+                "modality_configs",
+                {
+                    "video": {
+                        "embed_dim": 768,
+                        "compression_dim": 100,
+                        "num_heads": 8,
+                        "qk_dim": 64,
+                        "basis_type": "rectangular",
+                        "regularization": 0.01,
+                    },
+                    "audio": {
+                        "embed_dim": 512,
+                        "compression_dim": 100,
+                        "num_heads": 8,
+                        "qk_dim": 64,
+                        "basis_type": "rectangular",
+                        "regularization": 0.01,
+                    },
+                },
+            )
+
+        # Extract compression dims if not explicitly set
+        if self.compression_dims is None and self.modality_configs:
+            object.__setattr__(
+                self,
+                "compression_dims",
+                {
+                    name: cfg.get("compression_dim", 100)
+                    for name, cfg in self.modality_configs.items()
+                },
+            )
+
+        # Extract basis types if not explicitly set
+        if self.basis_types is None and self.modality_configs:
+            object.__setattr__(
+                self,
+                "basis_types",
+                {
+                    name: cfg.get("basis_type", "rectangular")
+                    for name, cfg in self.modality_configs.items()
+                },
+            )
+
+        # Extract regularizations if not explicitly set
+        if self.regularizations is None and self.modality_configs:
+            object.__setattr__(
+                self,
+                "regularizations",
+                {
+                    name: cfg.get("regularization", 0.01)
+                    for name, cfg in self.modality_configs.items()
+                },
+            )
+
+        # Set default cross-modal pairs (all pairs) if not specified
+        if self.cross_modal_pairs is None and self.modality_configs:
+            modalities = list(self.modality_configs.keys())
+            pairs = []
+            for i, m1 in enumerate(modalities):
+                for m2 in modalities[i + 1 :]:
+                    pairs.extend([(m1, m2), (m2, m1)])
+            object.__setattr__(self, "cross_modal_pairs", pairs)
+
+        # Validate parameters
+        self._validate_met_params()
+
+    def _validate_met_params(self) -> None:
+        """Validate MET-specific parameters."""
+        self._validate_cross_modal_params()
+        self._validate_gradient_flow_params()
+        self._validate_method_params()
+
+    def _validate_cross_modal_params(self) -> None:
+        """Validate cross-modal related parameters."""
+        # Validate cross-modal weight
+        if not 0 <= self.cross_modal_weight <= 1:
+            raise ValueError(
+                f"cross_modal_weight must be in [0, 1], got {self.cross_modal_weight}"
+            )
+
+        # Validate temporal window
+        if self.temporal_window <= 0 or self.temporal_window % 2 == 0:
+            raise ValueError(
+                f"temporal_window must be positive odd number, got {self.temporal_window}"
+            )
+
+        # Validate integration points
+        if self.integration_points <= 0:
+            raise ValueError(
+                f"integration_points must be positive, got {self.integration_points}"
+            )
+
+    def _validate_gradient_flow_params(self) -> None:
+        """Validate gradient flow parameters."""
+        if self.max_iterations <= 0:
+            raise ValueError(
+                f"max_iterations must be positive, got {self.max_iterations}"
+            )
+        if self.step_size <= 0:
+            raise ValueError(f"step_size must be positive, got {self.step_size}")
+        if self.time_constant <= 0:
+            raise ValueError(
+                f"time_constant must be positive, got {self.time_constant}"
+            )
+        if self.convergence_tolerance <= 0:
+            raise ValueError(
+                f"convergence_tolerance must be positive, got {self.convergence_tolerance}"
+            )
+
+        # Validate stochastic depth rate
+        if not 0 <= self.stochastic_depth_rate <= 1:
+            raise ValueError(
+                f"stochastic_depth_rate must be in [0, 1], got {self.stochastic_depth_rate}"
+            )
+
+    def _validate_method_params(self) -> None:
+        """Validate method and activation parameters."""
+        # Validate integrator method
+        valid_methods = {"trapezoidal", "simpson", "gauss", "monte_carlo", "adaptive"}
+        if self.integrator_method not in valid_methods:
+            raise ValueError(
+                f"integrator_method must be one of {valid_methods}, got {self.integrator_method}"
+            )
+
+        # Validate Hopfield activation
+        valid_activations = {"softplus", "relu"}
+        if self.hopfield_activation not in valid_activations:
+            raise ValueError(
+                f"hopfield_activation must be one of {valid_activations}, "
+                f"got {self.hopfield_activation}"
             )
