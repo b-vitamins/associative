@@ -59,30 +59,24 @@ setup(
         "torchaudio>=2.0.0,<3.0.0",  # 2.8.0 in Guix
         "torchmetrics>=1.0.0,<2.0.0",  # 1.4.1 in Guix
         # Note: torchvggish has no specific version requirement
-        
         # Transformers and utilities
         "transformers>=4.40.0,<5.0.0",  # 4.44.2 in Guix
         "huggingface-hub>=0.20.0,<1.0.0",  # 0.32.2 in Guix
         "einops>=0.6.0,<1.0.0",  # 0.8.1 in Guix
-        
         # Data processing
         "pandas>=2.0.0,<3.0.0",  # 2.2.3 in Guix
         "pyarrow>=20.0.0,<22.0.0",  # 21.0.0 in Guix
-        
         # Audio processing
         "librosa>=0.10.0,<1.0.0",  # 0.10.2.post1 in Guix
         "soundfile>=0.12.0,<1.0.0",  # 0.13.1 in Guix
         "pesq>=0.0.4,<1.0.0",  # 0.15 in Guix
         "pystoi>=0.3.0,<1.0.0",  # 0.4.1 in Guix
-        
         # Video processing
         "decord>=0.6.0,<1.0.0",  # 0.6.0 in Guix
-        
         # Visualization
         "pillow>=10.0.0,<12.0.0",  # 11.1.0 in Guix
         "matplotlib>=3.5.0,<4.0.0",  # 3.8.2 in Guix
         "scikit-learn>=1.0.0,<2.0.0",  # 1.6.1 in Guix
-        
         # General utilities
         "tqdm>=4.60.0,<5.0.0",  # 4.67.1 in Guix
         "hydra-core>=1.3.0,<2.0.0",  # 1.3.2 in Guix
