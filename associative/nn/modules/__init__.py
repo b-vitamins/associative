@@ -1,7 +1,15 @@
 """Associative memory model modules."""
 
 from .attention import EnergyAttention, GraphEnergyAttention, MultimodalEnergyAttention
-from .basis import ContinuousCompression
+from .basis import (
+    BasisFunction,
+    ContinuousCompression,
+    FourierBasis,
+    GaussianBasis,
+    PolynomialBasis,
+    RectangularBasis,
+    create_basis,
+)
 from .config import (
     BasisConfig,
     CCCPConfig,
@@ -46,6 +54,8 @@ __all__ = [
     "AdaptiveIntegrator",
     # Configuration classes
     "BasisConfig",
+    # Basis functions
+    "BasisFunction",
     "CCCPConfig",
     "CCCPOptimizer",
     # Continuous modules
@@ -68,7 +78,9 @@ __all__ = [
     "EnergyTransformer",
     "EnergyTransformerBlock",
     "EnergyTransformerConfig",
+    "FourierBasis",
     "GaussLegendreIntegrator",
+    "GaussianBasis",
     "GraphEnergyAttention",
     "GraphEnergyBlock",
     "GraphEnergyTransformer",
@@ -84,8 +96,11 @@ __all__ = [
     "MultimodalEnergyTransformer",
     "OptimizationResult",
     "PatchEmbed",
+    "PolynomialBasis",
     "QuadraticConvexSolver",
+    "RectangularBasis",
     "SimpsonIntegrator",
     "TrapezoidalIntegrator",
+    "create_basis",
     "create_integrator",
 ]
