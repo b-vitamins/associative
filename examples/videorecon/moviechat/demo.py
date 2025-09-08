@@ -1,472 +1,467 @@
 #!/usr/bin/env python3
-"""Comparative experiment for video reconstruction using different basis functions.
+"""Demo comparing basis functions for video reconstruction matching CHM-Net paper.
 
-This experiment evaluates the performance of Continuous Hopfield Networks with
-various basis function types on video embedding reconstruction tasks using the
-MovieChat dataset.
+This demo evaluates Continuous Hopfield Networks with various basis functions
+on video reconstruction using MovieChat-1K test split with exact paper settings.
 """
+# ruff: noqa: N803, N806, N812
 
+import gc
+import os
 import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parents[3]))
 
+# Suppress FFmpeg/libav warnings (like mmco errors)
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;quiet"
+os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
 
-from dataclasses import dataclass
-
-import hydra
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from omegaconf import DictConfig
-from torch import Tensor
-from torch.nn import functional
+import torch.nn.functional as F
+from matplotlib.ticker import MultipleLocator
 from tqdm import tqdm
 
-from associative.datasets.moviechat import create_moviechat_dataloader
-from associative.nn.modules.config import (
-    BasisConfig,
-    CCCPConfig,
-    ContinuousHopfieldConfig,
-)
+from associative.datasets.moviechat import MovieChat1K
+from associative.nn.modules.config import BasisConfig, ContinuousHopfieldConfig
 from associative.nn.modules.continuous import ContinuousHopfield
-from associative.utils.masking import add_noise_to_embeddings, generate_random_mask
-from associative.utils.video.embeddings import get_embedder
+from associative.utils.masking import apply_spatial_mask
 
 matplotlib.use("Agg")
 
 
-@dataclass
-class PlotConfig:
-    """Configuration for plotting a metric."""
+class VideoReconstructionDemo:
+    """Demo runner for comparing basis functions on video reconstruction."""
 
-    x_pos: np.ndarray
-    means: list
-    stds: list
-    colors: list
-    ylabel: str
-    title: str
-    ylim: tuple | None = None
-    log_scale: bool = False
-    value_format: str = ".3f"
-    y_offset: float = 0.02
-
-
-class BasisFunctionExperiment:
-    """Experiment runner for comparing basis functions in CHN models."""
-
-    def __init__(self, cfg: DictConfig):
-        """Initialize experiment with configuration.
+    def __init__(self, N: int = 128, L: int = 1024):
+        """Initialize demo with paper parameters.
 
         Args:
-            cfg: Hydra configuration object
+            N: Number of basis functions to use (default: 128 for good compression)
+            L: Number of frames/memory size (default: 1024)
         """
-        self.cfg = cfg
+        # Configuration from CHM-Net paper
+        self.L = L  # Number of frames (memory size)
+        self.N = N  # Fixed number of basis functions for comparison
+        self.resolution = 224
+        self.beta = 1.0
+        self.num_iterations = 3
+        self.mask_ratio = 0.5
+        self.regularization = 0.5  # λ from paper
+        self.integration_points = 500
+
+        # Basis types to compare
+        self.basis_types = ["rectangular", "gaussian", "fourier", "polynomial"]
+
+        # Number of videos to average over
+        self.num_videos = 100
+
+        # Device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.basis_types = cfg.experiment.get(
-            "basis_types",
-            ["rectangular", "gaussian", "fourier", "polynomial"],
-        )
-        self.num_videos = cfg.experiment.get("num_videos", 10)
-        self.results_dir = Path(cfg.experiment.get("results_dir", "outputs/results"))
+
+        # Results directory
+        self.results_dir = Path("outputs/results")
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_chn_model(self, basis_type: str) -> ContinuousHopfield:
-        """Create a CHN model with specified basis function type.
+    def create_model(self, basis_type: str) -> ContinuousHopfield:
+        """Create a Continuous Hopfield model with specified basis type.
 
         Args:
-            basis_type: Type of basis function to use
+            basis_type: Type of basis function
 
         Returns:
             Configured ContinuousHopfield model
         """
         basis_config = BasisConfig(
-            num_basis=self.cfg.model.chn.basis.num_basis,
             basis_type=basis_type,
-            domain=self.cfg.model.chn.basis.domain,
+            num_basis=self.N,  # Fixed N for all basis types
+            domain=(0.0, 1.0),
+            overlap=0.0,  # Non-overlapping as per paper
         )
 
-        cccp_config = CCCPConfig(
-            max_iterations=self.cfg.model.chn.cccp.max_iterations,
-            tolerance=self.cfg.model.chn.cccp.tolerance,
-            step_size=self.cfg.model.chn.cccp.get("step_size", 1.0),
-            momentum=self.cfg.model.chn.cccp.get("momentum", 0.0),
-            track_trajectory=False,
-            use_line_search=self.cfg.model.chn.cccp.get("use_line_search", False),
-        )
-
-        chn_config = ContinuousHopfieldConfig(
+        config = ContinuousHopfieldConfig(
             basis_config=basis_config,
-            cccp_config=cccp_config,
-            beta=self.cfg.model.chn.beta,
-            regularization=self.cfg.model.chn.basis.get("regularization", 1e-3),
-            integration_points=self.cfg.model.chn.get("num_integration_points", 500),
+            beta=self.beta,
+            regularization=self.regularization,
+            integration_points=self.integration_points,
+            num_iterations=self.num_iterations,
         )
 
-        return ContinuousHopfield(chn_config).to(self.device)
+        return ContinuousHopfield(config).to(self.device)
 
-    def compute_embeddings(self, frames: Tensor, embedder: torch.nn.Module) -> Tensor:
-        """Compute embeddings for video frames in chunks.
+    @torch.no_grad()
+    def prepare_video(self, video: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare video for Hopfield network processing.
 
         Args:
-            frames: Video frames tensor of shape (num_frames, C, H, W)
-            embedder: Embedding model
+            video: Video frames tensor of shape [L, C, H, W], range [0, 1]
 
         Returns:
-            Embeddings tensor of shape (num_frames, embed_dim)
+            Tuple of (video_flat, queries) both of shape [L, D] on device
         """
-        chunk_size = self.cfg.experiment.get("embedding_chunk_size", 16)
-        embedding_chunks = []
+        L = video.size(0)
 
+        # Normalize to [-1, 1] as per CHM-Net paper
+        video = (video - 0.5) / 0.5
+
+        # Convert to [L, H, W, C] for masking
+        video = video.permute(0, 2, 3, 1)
+
+        # Apply spatial mask
+        video_masked, _ = apply_spatial_mask(
+            video,
+            mask_ratio=self.mask_ratio,
+            mask_type="lower",
+        )
+
+        # Reshape to [L, D] where D = H*W*C
+        video_flat = video.reshape(L, -1).to(self.device)
+        queries = video_masked.reshape(L, -1).to(self.device)
+
+        # Clean up intermediate tensors
+        del video_masked
+
+        return video_flat, queries
+
+    def process_video(self, video: torch.Tensor, basis_type: str) -> float:
+        """Process a single video with specified basis type.
+
+        Args:
+            video: Video frames tensor of shape [L, C, H, W], range [0, 1]
+            basis_type: Type of basis function
+
+        Returns:
+            Cosine similarity score
+        """
+        # Prepare video
+        video_flat, queries = self.prepare_video(video)
+
+        # Create model with specified basis type
+        model = self.create_model(basis_type)
+
+        # Add batch dimension for model forward pass
+        video_batch = video_flat.unsqueeze(0)  # (1, L, D)
+        queries_batch = queries.unsqueeze(0)  # (1, L, D)
+
+        # Perform reconstruction
         with torch.no_grad():
-            for i in range(0, frames.size(0), chunk_size):
-                chunk = frames[i : min(i + chunk_size, frames.size(0))]
-                embeddings = embedder(chunk)
-                embedding_chunks.append(embeddings.cpu())
+            reconstructed, _ = model(video_batch, queries_batch)
+            reconstructed = reconstructed.squeeze(0)  # Back to (L, D)
 
-        return torch.cat(embedding_chunks, dim=0)
+        # CRITICAL: Clear the model's internal coefficients to free memory
+        if (
+            hasattr(model, "memory")
+            and hasattr(model.memory, "coefficients")
+            and model.memory.coefficients is not None
+        ):
+            del model.memory.coefficients
+            # Set to empty tensor instead of None to avoid type issues
+            model.memory.coefficients = torch.empty(0, device=self.device)
 
-    def evaluate_reconstruction(
-        self,
-        model: ContinuousHopfield,
-        embeddings: Tensor,
-        mask_ratio: float,
-    ) -> dict[str, float]:
-        """Evaluate reconstruction performance for a single model.
+        # Delete model completely
+        del model
 
-        Args:
-            model: ContinuousHopfield model to evaluate
-            embeddings: Original embeddings of shape (batch_size, num_frames, embed_dim)
-            mask_ratio: Ratio of frames to mask
+        # Delete batch tensors
+        del video_batch, queries_batch
+        torch.cuda.empty_cache()
 
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        batch_size, num_frames, embed_dim = embeddings.shape
+        # Compute cosine similarity
+        with torch.no_grad():
+            video_norm = F.normalize(video_flat, p=2, dim=1)
+            recon_norm = F.normalize(reconstructed, p=2, dim=1)
+            cosine_sim = (video_norm * recon_norm).sum(dim=1).mean().item()
 
-        use_noise = self.cfg.experiment.get("use_noise_masking", False)
+        # Clean up remaining tensors
+        del reconstructed, video_norm, recon_norm
+        del video_flat, queries
+        torch.cuda.empty_cache()
 
-        if use_noise:
-            noise_std = self.cfg.experiment.get("noise_std", 5.0)
-            torch.manual_seed(42)
-            queries = add_noise_to_embeddings(embeddings, noise_std=noise_std)
+        return cosine_sim
 
-            with torch.no_grad():
-                reconstructed = model(memories=embeddings, queries=queries)
+    def _print_configuration(self):
+        """Print demo configuration."""
+        print("=" * 60)
+        print("VIDEO RECONSTRUCTION DEMO")
+        print("=" * 60)
+        print("Configuration:")
+        print(f"  L (frames): {self.L}")
+        print(f"  N (basis functions): {self.N}")
+        print(f"  Compression ratio: {self.N / self.L:.1%}")
+        print(f"  Resolution: {self.resolution}x{self.resolution}")
+        print(f"  Beta: {self.beta}")
+        print(f"  Iterations: {self.num_iterations}")
+        print(f"  Mask ratio: {self.mask_ratio}")
+        print(f"  Regularization (lambda): {self.regularization}")
+        print(f"  Integration points: {self.integration_points}")
+        print(f"  Videos to test: {self.num_videos}")
+        print(f"  Basis types: {', '.join(self.basis_types)}")
+        print("=" * 60)
 
-            original_flat = embeddings.view(-1, embed_dim)
-            reconstructed_flat = reconstructed.view(-1, embed_dim)
-
+    def _evaluate_discrete_baseline(self, video_flat, queries):
+        """Evaluate discrete Hopfield baseline."""
+        # Subsample frames for discrete baseline (use same N as continuous)
+        if self.N < self.L:
+            indices = torch.linspace(0, self.L - 1, self.N).long()
+            X_sub = video_flat[indices]
         else:
-            mask = generate_random_mask(
-                batch_size=batch_size,
-                sequence_length=num_frames,
-                mask_ratio=mask_ratio,
-                device=self.device,
-            )
+            X_sub = video_flat
 
-            masked_embeddings = embeddings.clone()
-            masked_embeddings[mask] = 0.0
+        # Run discrete Hopfield
+        Q_disc = queries.clone()
+        for _ in range(self.num_iterations):
+            scores = self.beta * Q_disc @ X_sub.T
+            probs = F.softmax(scores, dim=1)
+            Q_disc = probs @ X_sub
 
-            with torch.no_grad():
-                reconstructed = model(memories=embeddings, queries=masked_embeddings)
+        # Compute similarity
+        video_norm = F.normalize(video_flat, p=2, dim=1)
+        Q_disc_norm = F.normalize(Q_disc, p=2, dim=1)
+        cosine_sim_disc = (video_norm * Q_disc_norm).sum(dim=1).mean().item()
 
-            mask_expanded = mask.unsqueeze(-1).expand_as(embeddings)
-            original_flat = embeddings[mask_expanded].view(-1, embed_dim)
-            reconstructed_flat = reconstructed[mask_expanded].view(-1, embed_dim)
+        # Clean up
+        del X_sub, Q_disc, Q_disc_norm, video_norm
 
-        cosine_sim = functional.cosine_similarity(
-            reconstructed_flat, original_flat, dim=-1
-        ).mean()
+        return cosine_sim_disc
 
-        mse = functional.mse_loss(reconstructed_flat, original_flat)
+    def run_demo(self):
+        """Run the complete demo experiment."""
+        self._print_configuration()
 
-        norm_error = torch.norm(reconstructed_flat - original_flat, dim=-1) / (
-            torch.norm(original_flat, dim=-1) + 1e-8
-        )
-
-        return {
-            "cosine_similarity": cosine_sim.item(),
-            "mse": mse.item(),
-            "normalized_error": norm_error.mean().item(),
-        }
-
-    def run_experiment(self) -> dict[str, list[dict]]:
-        """Run the complete experiment.
-
-        Returns:
-            Dictionary mapping basis types to lists of metric results
-        """
-        embedder_cfg = dict(self.cfg.model.embedder)
-        embedder_name = embedder_cfg.pop("name")
-        embedder = get_embedder(embedder_name, **embedder_cfg).to(self.device)
-        embedder.freeze()
-
-        _, dataloader = create_moviechat_dataloader(
+        # Load dataset (test split as per paper)
+        dataset = MovieChat1K(
             split="test",
-            batch_size=1,
-            num_workers=self.cfg.data.num_workers,
-            num_frames=self.cfg.data.num_frames,
-            resolution=self.cfg.data.resolution,
+            num_frames=self.L,
+            resolution=self.resolution,
+            download=False,
+            max_videos=self.num_videos,
         )
 
+        print(f"Found {len(dataset)} videos in test split")
+        print("Processing videos...")
+
+        # Initialize results storage
         results = {basis_type: [] for basis_type in self.basis_types}
 
-        pbar = tqdm(dataloader, total=self.num_videos, desc="Processing videos")
+        # Also track discrete baseline
+        results["discrete"] = []
 
-        for videos_processed, batch in enumerate(pbar):
-            if videos_processed >= self.num_videos:
-                break
+        # Process each video
+        for video_idx in tqdm(range(len(dataset)), desc="Videos"):
+            sample = dataset[video_idx]
+            video = sample["frames"]  # Shape: [L, C, H, W], range [0, 1]
 
-            frames = batch["frames"].squeeze(0).to(self.device)
+            # Keep video on CPU initially
+            video = video.cpu()
 
-            embeddings = self.compute_embeddings(frames, embedder)
-            embeddings = embeddings.unsqueeze(0).to(self.device)
-
+            # Test each basis type
             for basis_type in self.basis_types:
-                pbar.set_description(f"Video {videos_processed + 1}: {basis_type}")
-
-                model = self.create_chn_model(basis_type)
-
-                metrics = self.evaluate_reconstruction(
-                    model, embeddings, self.cfg.data.mask_ratio
-                )
-
-                results[basis_type].append(metrics)
-
-                del model
+                cosine_sim = self.process_video(video, basis_type)
+                results[basis_type].append(cosine_sim)
+                # Clean up after each basis type to prevent accumulation
                 torch.cuda.empty_cache()
 
-        pbar.close()
+            # Discrete baseline (subsampled frames)
+            video_flat, queries = self.prepare_video(video)
+            cosine_sim_disc = self._evaluate_discrete_baseline(video_flat, queries)
+            results["discrete"].append(cosine_sim_disc)
 
-        return results
+            # Clean up
+            del video, video_flat, queries
+            del sample
+            torch.cuda.empty_cache()
 
-    def _calculate_stats(self, results: dict[str, list[dict]]) -> dict:
-        """Calculate statistics for each basis type."""
+            # Extra cleanup every 10 videos
+            if (video_idx + 1) % 10 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        # Final cleanup before statistics
+        torch.cuda.empty_cache()
+
+        # Compute statistics
         stats = {}
-        for basis_type in self.basis_types:
-            metrics = results[basis_type]
-            stats[basis_type] = {
-                "cosine_similarity": {
-                    "mean": np.mean([m["cosine_similarity"] for m in metrics]),
-                    "std": np.std([m["cosine_similarity"] for m in metrics]),
-                },
-                "mse": {
-                    "mean": np.mean([m["mse"] for m in metrics]),
-                    "std": np.std([m["mse"] for m in metrics]),
-                },
-                "normalized_error": {
-                    "mean": np.mean([m["normalized_error"] for m in metrics]),
-                    "std": np.std([m["normalized_error"] for m in metrics]),
-                },
+        for model_type in [*list(self.basis_types), "discrete"]:
+            similarities = results[model_type]
+            stats[model_type] = {
+                "mean": np.mean(similarities),
+                "std": np.std(similarities) if len(similarities) > 1 else 0.0,
+                "min": np.min(similarities) if similarities else 0.0,
+                "max": np.max(similarities) if similarities else 0.0,
             }
+
         return stats
 
-    def _plot_metric(self, ax, config: PlotConfig):
-        """Plot a single metric with error bars and labels."""
-        ax.bar(
-            config.x_pos,
-            config.means,
-            color=config.colors,
-            alpha=0.8,
-            edgecolor="black",
-            linewidth=1,
+    def plot_results(self, stats):
+        """Create bar plot visualization comparing basis functions."""
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        # Prepare data for plotting
+        model_types = [*self.basis_types, "discrete"]
+        means = [stats[mt]["mean"] for mt in model_types]
+        stds = [stats[mt]["std"] for mt in model_types]
+
+        # Colors for different model types
+        colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+
+        # Create bar plot
+        x_pos = np.arange(len(model_types))
+        bars = ax.bar(
+            x_pos, means, color=colors, alpha=0.8, edgecolor="black", linewidth=1.5
         )
 
+        # Add error bars
         ax.errorbar(
-            config.x_pos,
-            config.means,
-            yerr=config.stds,
+            x_pos,
+            means,
+            yerr=stds,
             fmt="none",
             color="black",
-            capsize=4,
-            capthick=1.5,
-            elinewidth=1.5,
+            capsize=5,
+            capthick=2,
+            elinewidth=2,
             alpha=0.7,
         )
 
-        for i, (mean, std) in enumerate(zip(config.means, config.stds, strict=False)):
-            y_pos = mean + std * (1.2 if config.log_scale else 1.0) + config.y_offset
+        # Add value labels on bars
+        for _i, (bar, mean, std) in enumerate(zip(bars, means, stds, strict=False)):
+            height = bar.get_height()
             ax.text(
-                i,
-                y_pos,
-                f"{mean:{config.value_format}}",
+                bar.get_x() + bar.get_width() / 2.0,
+                height + std + 0.01,
+                f"{mean:.3f}",
                 ha="center",
                 va="bottom",
-                fontsize=10 if config.value_format == ".3f" else 9,
+                fontsize=11,
                 fontweight="bold",
             )
 
-        ax.set_xticks(config.x_pos)
-        ax.set_xticklabels(self.basis_types, rotation=30, ha="right")
-        ax.set_xlabel("Basis Function Type", fontsize=11, fontweight="bold")
-        ax.set_ylabel(config.ylabel, fontsize=11, fontweight="bold")
-        ax.set_title(config.title, fontsize=12, fontweight="bold", pad=15)
-
-        if config.ylim:
-            ax.set_ylim(config.ylim)
-        if config.log_scale:
-            ax.set_yscale("log")
-
-    def plot_results(self, results: dict[str, list[dict]]) -> None:
-        """Create and save visualization plots.
-
-        Args:
-            results: Dictionary mapping basis types to lists of metric results
-        """
-        stats = self._calculate_stats(results)
-        colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D"]
-
-        fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-        for ax in axes:
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.grid(True, alpha=0.2, linestyle="--", linewidth=0.5)
-            ax.set_axisbelow(True)
-
-        x_pos = np.arange(len(self.basis_types))
-
-        # Plot cosine similarity
-        means = [stats[bt]["cosine_similarity"]["mean"] for bt in self.basis_types]
-        stds = [stats[bt]["cosine_similarity"]["std"] for bt in self.basis_types]
-        config = PlotConfig(
-            x_pos=x_pos,
-            means=means,
-            stds=stds,
-            colors=colors,
-            ylabel="Cosine Similarity",
-            title="Reconstruction Quality",
-            ylim=(0, 1.05),
-        )
-        self._plot_metric(axes[0], config)
-
-        # Plot MSE
-        means = [stats[bt]["mse"]["mean"] for bt in self.basis_types]
-        stds = [stats[bt]["mse"]["std"] for bt in self.basis_types]
-        config = PlotConfig(
-            x_pos=x_pos,
-            means=means,
-            stds=stds,
-            colors=colors,
-            ylabel="Mean Squared Error (log scale)",
-            title="Reconstruction Error",
-            log_scale=True,
-            value_format=".2e",
-        )
-        self._plot_metric(axes[1], config)
-
-        # Plot normalized error
-        means = [stats[bt]["normalized_error"]["mean"] for bt in self.basis_types]
-        stds = [stats[bt]["normalized_error"]["std"] for bt in self.basis_types]
-        config = PlotConfig(
-            x_pos=x_pos,
-            means=means,
-            stds=stds,
-            colors=colors,
-            ylabel="Normalized Error",
-            title="Relative Error",
-            y_offset=0.01,
-        )
-        self._plot_metric(axes[2], config)
-
-        fig.suptitle(
-            "CHN Basis Function Comparison on Video Reconstruction",
-            fontsize=14,
+        # Customize plot
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([mt.capitalize() for mt in model_types], fontsize=12)
+        ax.set_xlabel("Basis Function", fontsize=14, fontweight="medium")
+        ax.set_ylabel("Cosine Similarity", fontsize=14, fontweight="medium")
+        ax.set_title(
+            f"Video Reconstruction (N={self.N}, L={self.L})",
+            fontsize=15,
             fontweight="bold",
-            y=1.02,
+            pad=20,
         )
 
-        plt.tight_layout()
+        # Set y-axis limits
+        ax.set_ylim(0, 1.05)
+        ax.yaxis.set_major_locator(MultipleLocator(0.1))
 
-        output_path = self.results_dir / "basis-comparison.png"
+        # Add grid
+        ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+        ax.set_axisbelow(True)
+
+        # Remove top and right spines
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        # Add horizontal line at discrete baseline for reference
+        discrete_mean = stats["discrete"]["mean"]
+        ax.axhline(
+            y=discrete_mean,
+            color="gray",
+            linestyle=":",
+            alpha=0.5,
+            label=f"Discrete baseline: {discrete_mean:.3f}",
+        )
+        ax.legend(loc="upper right", fontsize=11)
+
+        # Save plot
+        output_path = self.results_dir / "demo-basis-comparison.png"
+        plt.tight_layout()
         plt.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
-        print(f"Plots saved to {output_path}")
+        print(f"Plot saved to: {output_path}")
         plt.close()
 
-    def print_summary(self, results: dict[str, list[dict]]) -> None:
-        """Print experiment summary to console.
-
-        Args:
-            results: Dictionary mapping basis types to lists of metric results
-        """
-        stats = {}
-        for basis_type in self.basis_types:
-            metrics = results[basis_type]
-            stats[basis_type] = {
-                "cos_sim": (
-                    np.mean([m["cosine_similarity"] for m in metrics]),
-                    np.std([m["cosine_similarity"] for m in metrics]),
-                ),
-                "mse": (
-                    np.mean([m["mse"] for m in metrics]),
-                    np.std([m["mse"] for m in metrics]),
-                ),
-                "norm_err": (
-                    np.mean([m["normalized_error"] for m in metrics]),
-                    np.std([m["normalized_error"] for m in metrics]),
-                ),
-            }
-
-        best_cos_sim = max(self.basis_types, key=lambda bt: stats[bt]["cos_sim"][0])
-        best_mse = min(self.basis_types, key=lambda bt: stats[bt]["mse"][0])
-
-        print("\n" + "=" * 62)
-        print("              RECONSTRUCTION PERFORMANCE")
-        print("=" * 62)
-        print(" Basis Type    | Cos Sim ^ |    MSE v    | Norm Err v")
-        print("---------------+-----------+-------------+---------------")
-
-        for basis_type in self.basis_types:
-            s = stats[basis_type]
-
-            cos_marker = "*" if basis_type == best_cos_sim else " "
-
-            print(
-                f" {basis_type:13s} | "
-                f"{s['cos_sim'][0]:.3f}+-{s['cos_sim'][1]:.3f}{cos_marker}| "
-                f"{s['mse'][0]:.4e} | "
-                f"{s['norm_err'][0]:.3f}+-{s['norm_err'][1]:.3f}"
-            )
-
-        print("=" * 62)
-        print(f"\n* Best: {best_cos_sim} (similarity), {best_mse} (MSE)")
+    def print_summary(self, stats):
+        """Print summary of results."""
+        print("=" * 70)
         print(
-            f"Videos: {self.num_videos} | Frames: {self.cfg.data.num_frames} | "
-            f"Mask: {self.cfg.data.mask_ratio:.0%}"
+            f"           RESULTS SUMMARY (N={self.N}, compression={self.N / self.L:.1%})"
+        )
+        print("=" * 70)
+        print("Model Type       |   Mean   |   Std    |   Min    |   Max")
+        print("-" * 70)
+
+        # Sort by mean performance
+        sorted_models = sorted(
+            stats.keys(), key=lambda x: stats[x]["mean"], reverse=True
         )
 
+        for model_type in sorted_models:
+            s = stats[model_type]
+            is_best = model_type == sorted_models[0]
+            marker = " *" if is_best else "  "
 
-@hydra.main(version_base=None, config_path=".", config_name="config")
-def main(cfg: DictConfig) -> None:
-    """Main entry point for the experiment.
+            # Different formatting for discrete baseline
+            if model_type == "discrete":
+                print("-" * 70)
+                print(
+                    f"Discrete         | {s['mean']:.4f} | {s['std']:.4f} | "
+                    f"{s['min']:.4f} | {s['max']:.4f}{marker}"
+                )
+            else:
+                print(
+                    f"CHN {model_type:12s} | {s['mean']:.4f} | {s['std']:.4f} | "
+                    f"{s['min']:.4f} | {s['max']:.4f}{marker}"
+                )
 
-    Args:
-        cfg: Hydra configuration
-    """
-    device = torch.cuda.get_device_name() if torch.cuda.is_available() else "CPU"
-    basis_types = cfg.experiment.get(
-        "basis_types", ["rectangular", "gaussian", "fourier", "polynomial"]
+        print("=" * 70)
+        print("* = Best performing model")
+        # Analysis
+        best_continuous = max(
+            (mt for mt in self.basis_types), key=lambda x: stats[x]["mean"]
+        )
+        discrete_mean = stats["discrete"]["mean"]
+        best_cont_mean = stats[best_continuous]["mean"]
+
+        print("Analysis:")
+        print(f"  Best continuous: {best_continuous} ({best_cont_mean:.4f})")
+        print(f"  Discrete baseline: {discrete_mean:.4f}")
+
+        if best_cont_mean > discrete_mean:
+            improvement = (best_cont_mean - discrete_mean) / discrete_mean * 100
+            print(f"  Continuous beats discrete by {improvement:.1f}%")
+        else:
+            deficit = (discrete_mean - best_cont_mean) / discrete_mean * 100
+            print(f"  Discrete beats continuous by {deficit:.1f}%")
+
+
+def main():
+    """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Compare basis functions for video reconstruction"
     )
-
-    print("\n" + "-" * 60)
-    print("CHN BASIS FUNCTION COMPARISON")
-    print("-" * 60)
-    print(f"Device: {device}")
-    print(
-        f"Config: {cfg.experiment.get('num_videos', 10)} videos | {cfg.data.num_frames} frames | {cfg.data.mask_ratio:.0%} mask | {cfg.model.chn.basis.num_basis} basis"
+    parser.add_argument(
+        "--N", type=int, default=128, help="Number of basis functions (default: 128)"
     )
-    print(f"Types:  {', '.join(basis_types)}")
-    print("-" * 60)
+    parser.add_argument(
+        "--L", type=int, default=1024, help="Number of frames (default: 1024)"
+    )
+    parser.add_argument(
+        "--num-videos",
+        type=int,
+        default=100,
+        help="Number of videos to test (default: 100)",
+    )
+    args = parser.parse_args()
 
-    experiment = BasisFunctionExperiment(cfg)
-    results = experiment.run_experiment()
+    demo = VideoReconstructionDemo(N=args.N, L=args.L)
+    demo.num_videos = args.num_videos
 
-    experiment.plot_results(results)
-    experiment.print_summary(results)
-
-    print("\n[DONE] Experiment complete")
+    stats = demo.run_demo()
+    demo.plot_results(stats)
+    demo.print_summary(stats)
+    print("[DONE] Demo complete")
 
 
 if __name__ == "__main__":
